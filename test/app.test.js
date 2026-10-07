@@ -103,12 +103,12 @@ test('form rejects missing and invalid fields', async () => {
 });
 
 test('every admin route requires the login', async () => {
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people']) {
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/admin/login', path);
   }
-  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active']) {
+  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete']) {
     const response = await request(path, { method: 'POST', form: { name: 'x' } });
     assert.equal(response.status, 401, path);
   }
@@ -373,4 +373,70 @@ test('deleting an item: confirmation, blocked while checked out, owner only', as
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE item_id = ?').get(easel.id)).n, 0);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts').get()).n, others);
   assert.equal((await request(`/i/${easel.code}`)).status, 404);
+});
+
+test('settings: change name and password', async () => {
+  const account = { name: 'Old Name', email: 'settings@example.edu', password: 'first-long-password' };
+  const cookie = cookiesFrom(await signUp(account, TEACHER_CODE));
+
+  // Name.
+  assert.equal((await request('/admin/settings/name', { method: 'POST', cookie, form: { name: '  ' } })).status, 400);
+  assert.equal((await request('/admin/settings/name', { method: 'POST', cookie, form: { name: 'New Name' } })).status, 303);
+  assert.match(await (await request('/admin/settings?saved=name', { cookie })).text(), /New Name/);
+  assert.match(await (await request('/admin', { cookie })).text(), /New Name/);
+
+  // Password: wrong current, too short, mismatch, then success.
+  const change = (form) => request('/admin/settings/password', { method: 'POST', cookie, form });
+  assert.equal((await change({ current_password: 'nope-nope-nope', new_password: 'second-long-password', confirm_password: 'second-long-password' })).status, 403);
+  assert.equal((await change({ current_password: account.password, new_password: 'short', confirm_password: 'short' })).status, 400);
+  assert.equal((await change({ current_password: account.password, new_password: 'second-long-password', confirm_password: 'different-password' })).status, 400);
+  assert.equal((await change({ current_password: account.password, new_password: 'second-long-password', confirm_password: 'second-long-password' })).status, 303);
+
+  // The old password stops working; the new one works.
+  assert.equal((await request('/admin/login', { method: 'POST', form: { email: account.email, password: account.password } })).status, 401);
+  assert.equal((await request('/admin/login', { method: 'POST', form: { email: account.email, password: 'second-long-password' } })).status, 303);
+});
+
+test('delete accounts: own account, other accounts, last admin protected', async () => {
+  const adminCookie = await adminLogin();
+
+  // A teacher lists an item, then deletes their own account. A wrong password is refused first.
+  const teacher = { name: 'Leaving Teacher', email: 'leaving@example.edu', password: 'long-enough-password' };
+  const teacherCookie = cookiesFrom(await signUp(teacher, TEACHER_CODE));
+  await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Orphan Drum' } });
+  const drum = (await db.prepare("SELECT * FROM items WHERE name = 'Orphan Drum'").get());
+  await request(`/i/${drum.code}/checkout`, { method: 'POST', form: student({ student_name: 'Drum Dan', student_id: '31337' }) });
+
+  assert.equal((await request('/admin/settings/delete', { method: 'POST', cookie: teacherCookie, form: { password: 'wrong-password-x' } })).status, 403);
+  assert.ok((await db.prepare('SELECT id FROM users WHERE email = ?').get(teacher.email)));
+  const gone = await request('/admin/settings/delete', { method: 'POST', cookie: teacherCookie, form: { password: teacher.password } });
+  assert.equal(gone.status, 303);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE email = ?').get(teacher.email)).n, 0);
+  assert.equal((await request('/admin', { cookie: teacherCookie })).status, 302);
+
+  // The item and its history stay, now owned by the organization and visible to admins.
+  assert.equal((await db.prepare('SELECT owner_id FROM items WHERE id = ?').get(drum.id)).owner_id, null);
+  assert.match(await (await request('/admin', { cookie: adminCookie })).text(), /Drum Dan/);
+
+  // An admin deletes another account, including a deactivated one.
+  const other = { name: 'Other Teacher', email: 'other.teacher@example.edu', password: 'long-enough-password' };
+  await signUp(other, TEACHER_CODE);
+  const otherId = (await db.prepare('SELECT id FROM users WHERE email = ?').get(other.email)).id;
+  assert.match(await (await request(`/admin/people/${otherId}/delete`, { cookie: adminCookie })).text(), /cannot be undone/);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE id = ?').get(otherId)).n, 1);
+  assert.equal((await request(`/admin/people/${otherId}/delete`, { method: 'POST', cookie: adminCookie })).status, 303);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE id = ?').get(otherId)).n, 0);
+
+  // Teachers cannot delete accounts.
+  const teacher2 = cookiesFrom(await signUp({ name: 'T Two', email: 't2@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+  const adminId = (await db.prepare('SELECT id FROM users WHERE email = ?').get(ADMIN.email)).id;
+  assert.equal((await request(`/admin/people/${adminId}/delete`, { method: 'POST', cookie: teacher2 })).status, 403);
+
+  // The only admin cannot delete their own account.
+  const blocked = await request('/admin/settings/delete', { method: 'POST', cookie: adminCookie, form: { password: ADMIN.password } });
+  assert.equal(blocked.status, 409);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE id = ?').get(adminId)).n, 1);
+  // Deleting yourself through the People route is redirected to the safe flow.
+  assert.equal((await request(`/admin/people/${adminId}/delete`, { method: 'POST', cookie: adminCookie })).headers.get('location'), '/admin/settings/delete');
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE id = ?').get(adminId)).n, 1);
 });

@@ -82,6 +82,8 @@ There are two kinds of staff account. Both sign up at `/admin/signup` with a nam
 - To close sign-up, empty the code in `.env` (or your host's settings) and restart. Existing accounts keep working.
 - Admins open **People** to see all accounts and to **Deactivate** one. A deactivated account is logged out at once.
 - Log in at `/admin` with email and password. The login lasts 8 hours. After 8 wrong passwords, logins from that address are blocked for 15 minutes.
+- Click your name in the top bar to open **Settings**: change your name, change your password (asks for the current one), or delete your own account (asks for your password). Deleting an account keeps its items, which become organization items, and keeps all check-out history. The only remaining admin cannot delete their own account.
+- Admins can also **Delete** other accounts on the **People** page (after a confirmation page). Use **Deactivate** instead to block a login but keep the account.
 - There is no "forgot password" email. If someone forgets their password, an admin deactivates the account and the person signs up again with a different email. (Or delete their row from the `users` table and they can sign up again with the same email.)
 - Passwords are stored only as salted scrypt hashes.
 
@@ -211,4 +213,7 @@ Run these by hand after setup or after any change:
 - [ ] Search by student name and by item name. Filter by **Overdue**.
 - [ ] **Export CSV** downloads a file that opens in a spreadsheet.
 - [ ] Delete an item: the confirmation page appears; a checked-out item is refused; after deleting, the item and its link are gone.
+- [ ] Open **Settings** (click your name): change the name, change the password (wrong current password is refused), log in with the new password.
+- [ ] Delete your own teacher account in Settings: you are logged out, your items remain as organization items. The only admin is refused.
+- [ ] As admin, open **People**, **Delete** a teacher account after the confirmation page.
 - [ ] As admin, open **People** and deactivate the teacher. The teacher is logged out and cannot log in.

@@ -20,28 +20,46 @@ export function formatDate(day) {
   return new Date(year, month - 1, date).toLocaleDateString('en-US', { dateStyle: 'medium' });
 }
 
-function layout({ title, body, user = null, wide = false }) {
-  const nav = user
-    ? `<nav class="admin-nav no-print">
-        <a href="/admin">Checked out</a>
-        <a href="/admin/history">History</a>
-        <a href="/admin/items">Items</a>
-        <a href="/admin/qr">Codes</a>
-        ${user.role === 'admin' ? '<a href="/admin/people">People</a>' : ''}
-        <form method="post" action="/admin/logout"><span class="muted small">${esc(user.name)} (${esc(user.role)})</span> <button class="link-button">Log out</button></form>
-      </nav>`
-    : '';
+const STAFF_LINKS = [
+  ['dashboard', '/admin', 'Checked out'],
+  ['history', '/admin/history', 'History'],
+  ['items', '/admin/items', 'Items'],
+  ['codes', '/admin/qr', 'Codes'],
+  ['people', '/admin/people', 'People', 'admin'],
+];
+
+function layout({ title, body, user = null, active = '', wide = false }) {
+  const current = (key) => (active === key ? ' aria-current="page"' : '');
+  const links = STAFF_LINKS.filter(([, , , role]) => !role || role === user?.role)
+    .map(([key, href, label]) => `<a href="${href}"${current(key)}>${label}</a>`)
+    .join('');
+  const header = `<header class="site-header no-print">
+  <div class="header-inner">
+    <a class="brand" href="${user ? '/admin' : '/'}"><img src="/logo.svg" alt="" width="30" height="30"><span>Item Check-out</span></a>
+    ${
+      user
+        ? `<nav class="nav-links" aria-label="Staff">${links}</nav>
+    <div class="nav-user">
+      <a class="who" href="/admin/settings"${current('settings')}>${esc(user.name)}<span class="role-tag">${esc(user.role)}</span></a>
+      <form method="post" action="/admin/logout"><button class="link-button">Log out</button></form>
+    </div>`
+        : ''
+    }
+  </div>
+</header>`;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
 <title>${esc(title)}</title>
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-${nav}
+${header}
 <main class="${wide ? 'wide' : 'narrow'}">
 ${body}
 </main>
@@ -59,15 +77,18 @@ function errorList(errors) {
 export function homePage() {
   return layout({
     title: 'Item check-out',
-    body: `<h1>Item check-out</h1>
-<p>Scan the QR code on an item to check it out or return it.</p>
+    body: `<div class="hero">
+  <img src="/logo.svg" alt="" width="64" height="64">
+  <h1>Item check-out</h1>
+  <p>Scan the QR code on an item with your phone camera to check it out or return it.</p>
+</div>
 <form method="get" action="/find" class="card">
   <label>Or type or scan the code printed under the barcode
     <input type="text" name="code" autocomplete="off" autocapitalize="none" maxlength="40" required>
   </label>
   <button class="primary">Find item</button>
 </form>
-<p class="muted small"><a href="/admin">Staff login</a></p>`,
+<p class="muted small center"><a href="/admin">Staff login</a></p>`,
   });
 }
 
@@ -222,6 +243,7 @@ export function peoplePage({ user, people, signup }) {
   return layout({
     title: 'People',
     user,
+    active: 'people',
     wide: true,
     body: `<h1>People</h1>
 <p class="muted">Staff accounts. Admin sign-up is <strong>${signup.admin ? 'open' : 'closed'}</strong>, teacher sign-up is <strong>${signup.teacher ? 'open' : 'closed'}</strong>.
@@ -239,11 +261,12 @@ ${people
   <td>${person.active ? '<span class="badge ontime">Active</span>' : '<span class="badge returned">Deactivated</span>'}</td>
   <td>${
     person.id === user.id
-      ? '<span class="muted small">You</span>'
-      : `<form method="post" action="/admin/people/${person.id}/active">
+      ? '<a class="small" href="/admin/settings">Your settings</a>'
+      : `<div class="row-actions"><form method="post" action="/admin/people/${person.id}/active">
           <input type="hidden" name="active" value="${person.active ? '0' : '1'}">
           <button class="secondary small">${person.active ? 'Deactivate' : 'Reactivate'}</button>
-        </form>`
+        </form>
+        <a class="danger-link small" href="/admin/people/${person.id}/delete">Delete</a></div>`
   }</td>
 </tr>`
   )
@@ -291,17 +314,21 @@ ${rows
   )
   .join('')}
 </tbody></table></div>`
-    : `<p class="card muted">${q || status ? 'No check-outs match this search.' : 'Nothing is checked out right now.'}</p>`;
+    : `<p class="card empty">${q || status ? 'No check-outs match this search.' : 'Nothing is checked out right now.'}</p>`;
 
   return layout({
     title: 'Checked-out items',
     user,
+    active: 'dashboard',
     wide: true,
     body: `<div class="page-head">
   <h1>Checked-out items</h1>
   <a class="button secondary no-print" href="/admin/export.csv?scope=current">Export CSV</a>
 </div>
-<p class="muted">${counts.out} checked out, <span class="${counts.overdue ? 'text-overdue' : ''}">${counts.overdue} overdue</span></p>
+<div class="stats">
+  <div class="stat"><div class="value">${counts.out}</div><div class="label">Checked out</div></div>
+  <div class="stat ${counts.overdue ? 'alert-stat' : ''}"><div class="value">${counts.overdue}</div><div class="label">Overdue</div></div>
+</div>
 ${filterForm({
   action: '/admin',
   q,
@@ -332,11 +359,12 @@ ${rows
   )
   .join('')}
 </tbody></table></div>`
-    : '<p class="card muted">No check-outs found.</p>';
+    : '<p class="card empty">No check-outs found.</p>';
 
   return layout({
     title: 'Check-out history',
     user,
+    active: 'history',
     wide: true,
     body: `<div class="page-head">
   <h1>Check-out history</h1>
@@ -365,6 +393,7 @@ export function itemsPage({ user, items, errors = [], values = {} }) {
   return layout({
     title: 'Items',
     user,
+    active: 'items',
     wide: true,
     body: `<div class="page-head">
   <h1>Items</h1>
@@ -400,7 +429,7 @@ ${items
   )
   .join('')}
 </tbody></table></div>`
-    : '<p class="card muted">No items yet. List the first one above.</p>'
+    : '<p class="card empty">No items yet. List the first one above.</p>'
 }`,
   });
 }
@@ -409,6 +438,7 @@ export function editItemPage({ user, item, errors = [] }) {
   return layout({
     title: `Edit ${item.name}`,
     user,
+    active: 'items',
     body: `<h1>Edit item</h1>
 ${errorList(errors)}
 <form method="post" action="/admin/items/${item.id}" class="card">
@@ -428,6 +458,7 @@ export function deleteItemPage({ user, item, historyCount }) {
   return layout({
     title: `Delete ${item.name}`,
     user,
+    active: 'items',
     body: `<h1>Delete item</h1>
 <div class="card">
   <p><strong>${esc(item.name)}</strong>${item.description ? `<br><span class="muted">${esc(item.description)}</span>` : ''}</p>
@@ -453,6 +484,7 @@ export function qrSheetPage({ user, labels, baseUrl, single, justListed }) {
   return layout({
     title: 'Item codes',
     user,
+    active: 'codes',
     wide: true,
     body: `<div class="page-head no-print">
   <h1>${single ? 'Item code' : 'Item codes'}</h1>
@@ -479,7 +511,99 @@ ${labels
   .join('')}
 </div>
 <script src="/print.js"></script>`
-    : '<p class="card muted">No active items. List an item first.</p>'
+    : '<p class="card empty">No active items. List an item first.</p>'
 }`,
+  });
+}
+
+// ---------- Account pages ----------
+
+export function settingsPage({ user, notice = '', errors = {}, values = {} }) {
+  const notices = { name: 'Your name was updated.', password: 'Your password was changed.' };
+  return layout({
+    title: 'Settings',
+    user,
+    active: 'settings',
+    body: `<div class="page-head"><div><h1>Settings</h1><p class="page-sub">Manage your own account.</p></div></div>
+${notices[notice] ? `<div class="alert success" role="status">${notices[notice]}</div>` : ''}
+<section class="card inline-form">
+  <h2>Profile</h2>
+  ${errorList(errors.name)}
+  <form method="post" action="/admin/settings/name">
+    <label>Full name
+      <input type="text" name="name" value="${esc(values.name ?? user.name)}" autocomplete="name" maxlength="100" required>
+    </label>
+    <label>Email
+      <input type="email" value="${esc(user.email)}" readonly>
+    </label>
+    <label>Role
+      <input type="text" value="${esc(user.role)}" readonly>
+    </label>
+    <button class="primary">Save name</button>
+  </form>
+</section>
+<section class="card inline-form">
+  <h2>Change password</h2>
+  ${errorList(errors.password)}
+  <form method="post" action="/admin/settings/password">
+    <label>Current password
+      <input type="password" name="current_password" autocomplete="current-password" required>
+    </label>
+    <label>New password <span class="muted">(10 characters or more)</span>
+      <input type="password" name="new_password" autocomplete="new-password" minlength="10" maxlength="200" required>
+    </label>
+    <label>Confirm new password
+      <input type="password" name="confirm_password" autocomplete="new-password" minlength="10" maxlength="200" required>
+    </label>
+    <button class="primary">Change password</button>
+  </form>
+</section>
+<section class="card inline-form danger-zone">
+  <h2>Delete my account</h2>
+  <p class="muted">Your login is removed for good. Items you listed stay and become organization items, and all check-out history is kept.</p>
+  <a class="button secondary" href="/admin/settings/delete">Delete my account&hellip;</a>
+</section>`,
+  });
+}
+
+export function deleteAccountPage({ user, errors = [], lastAdmin = false }) {
+  return layout({
+    title: 'Delete my account',
+    user,
+    active: 'settings',
+    body: `<h1>Delete my account</h1>
+<div class="card">
+  ${
+    lastAdmin
+      ? `<div class="alert warning" role="alert"><strong>You are the only admin.</strong> Make someone else an admin first: they sign up with the admin code, then you can delete your account.</div>`
+      : `<div class="alert error" role="alert"><strong>This cannot be undone.</strong> Your account (${esc(user.email)}) is deleted and you are logged out. Items you listed stay and become organization items. Check-out history is kept.</div>
+  ${errorList(errors)}
+  <form method="post" action="/admin/settings/delete">
+    <label>Enter your password to confirm
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button class="danger block">Delete my account for good</button>
+  </form>`
+  }
+  <p><a href="/admin/settings">Cancel</a></p>
+</div>`,
+  });
+}
+
+export function deletePersonPage({ user, person, itemCount }) {
+  return layout({
+    title: `Delete ${person.name}`,
+    user,
+    active: 'people',
+    body: `<h1>Delete account</h1>
+<div class="card">
+  <p><strong>${esc(person.name)}</strong><br><span class="muted">${esc(person.email)} &middot; ${esc(person.role)}</span></p>
+  <div class="alert error" role="alert"><strong>This cannot be undone.</strong> The account is deleted and can no longer log in. Their ${itemCount} item${itemCount === 1 ? '' : 's'} stay and become organization items. Check-out history is kept.</div>
+  <p class="muted small">To block a login but keep the account, cancel and use <strong>Deactivate</strong> instead.</p>
+  <form method="post" action="/admin/people/${person.id}/delete">
+    <button class="danger block">Delete account for good</button>
+  </form>
+  <p><a href="/admin/people">Cancel</a></p>
+</div>`,
   });
 }

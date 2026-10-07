@@ -65,6 +65,8 @@ export function createApp({
   const loginLimiter = createRateLimiter(8, 15 * 60 * 1000);
   const returnLimiter = createRateLimiter(5, 10 * 60 * 1000);
   const signupLimiter = createRateLimiter(8, 15 * 60 * 1000);
+  // Limits password guesses on the settings page, per account.
+  const accountLimiter = createRateLimiter(8, 15 * 60 * 1000);
 
   app.use(async (req, res, next) => {
     res.set({
@@ -374,6 +376,80 @@ export function createApp({
     res.redirect(303, '/admin/login');
   });
 
+  // ---------- Own account: settings ----------
+
+  const passwordMatches = async (user, password) => {
+    const row = await db.prepare('SELECT password_hash FROM users WHERE id = ?').get(user.id);
+    return Boolean(row) && verifyPassword(String(password ?? ''), row.password_hash);
+  };
+
+  // Admins cannot be removed while they are the only active admin, so someone can always manage the site.
+  const isLastAdmin = async (user) =>
+    user.role === 'admin' &&
+    (await db.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND active = 1 AND id != ?").get(user.id))
+      .count === 0;
+
+  // Items of a removed account stay, as organization items. Check-out history is kept.
+  async function removeAccount(userId) {
+    await db.prepare('UPDATE items SET owner_id = NULL WHERE owner_id = ?').run(userId);
+    await db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+  }
+
+  admin.get('/settings', async (req, res) => {
+    res.send(views.settingsPage({ user: req.user, notice: text(req.query.saved, 20) }));
+  });
+
+  admin.post('/settings/name', async (req, res) => {
+    const name = text(req.body?.name, 100);
+    if (!name) {
+      return res.status(400).send(views.settingsPage({ user: req.user, errors: { name: ['Enter your full name.'] }, values: { name } }));
+    }
+    await db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, req.user.id);
+    res.redirect(303, '/admin/settings?saved=name');
+  });
+
+  admin.post('/settings/password', async (req, res) => {
+    const fail = (status, message) =>
+      res.status(status).send(views.settingsPage({ user: req.user, errors: { password: [message] } }));
+    const limiterKey = `user:${req.user.id}`;
+    if (accountLimiter.isBlocked(limiterKey)) return fail(429, 'Too many attempts. Try again in 15 minutes.');
+
+    const newPassword = String(req.body?.new_password ?? '');
+    if (!(await passwordMatches(req.user, req.body?.current_password))) {
+      accountLimiter.recordFailure(limiterKey);
+      return fail(403, 'Your current password is not correct.');
+    }
+    if (newPassword.length < 10) return fail(400, 'Choose a new password of 10 characters or more.');
+    if (newPassword.length > 200) return fail(400, 'Choose a new password of 200 characters or fewer.');
+    if (newPassword !== String(req.body?.confirm_password ?? '')) return fail(400, 'The new passwords do not match.');
+
+    accountLimiter.clear(limiterKey);
+    await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), req.user.id);
+    res.redirect(303, '/admin/settings?saved=password');
+  });
+
+  admin.get('/settings/delete', async (req, res) => {
+    res.send(views.deleteAccountPage({ user: req.user, lastAdmin: await isLastAdmin(req.user) }));
+  });
+
+  admin.post('/settings/delete', async (req, res) => {
+    if (await isLastAdmin(req.user)) {
+      return res.status(409).send(views.deleteAccountPage({ user: req.user, lastAdmin: true }));
+    }
+    const limiterKey = `user:${req.user.id}`;
+    if (accountLimiter.isBlocked(limiterKey)) {
+      return res.status(429).send(views.deleteAccountPage({ user: req.user, errors: ['Too many attempts. Try again in 15 minutes.'] }));
+    }
+    if (!(await passwordMatches(req.user, req.body?.password))) {
+      accountLimiter.recordFailure(limiterKey);
+      return res.status(403).send(views.deleteAccountPage({ user: req.user, errors: ['That password is not correct.'] }));
+    }
+    accountLimiter.clear(limiterKey);
+    await removeAccount(req.user.id);
+    res.clearCookie(ADMIN_COOKIE, cookieOptions(req, { sameSite: 'strict', path: '/admin' }));
+    res.redirect(303, '/admin/login');
+  });
+
   // Teachers see only items they listed and the check-outs of those items. Admins see everything.
   // Every query on items or check-outs below goes through this.
   function ownerScope(user, where, params) {
@@ -576,6 +652,25 @@ export function createApp({
     res.send(
       views.peoplePage({ user: req.user, people, signup: { admin: Boolean(adminSignupCode), teacher: Boolean(teacherSignupCode) } })
     );
+  });
+
+  admin.get('/people/:id/delete', requireAdmin, async (req, res) => {
+    const personId = Number(req.params.id);
+    if (personId === req.user.id) return res.redirect('/admin/settings/delete');
+    const person = await db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(personId);
+    if (!person) return res.status(404).type('text').send('Account not found');
+    const { count } = await db.prepare('SELECT COUNT(*) AS count FROM items WHERE owner_id = ?').get(person.id);
+    res.send(views.deletePersonPage({ user: req.user, person, itemCount: count }));
+  });
+
+  admin.post('/people/:id/delete', requireAdmin, async (req, res) => {
+    const personId = Number(req.params.id);
+    // Your own account is removed from Settings, which asks for your password.
+    if (personId === req.user.id) return res.redirect(303, '/admin/settings/delete');
+    const person = await db.prepare('SELECT id FROM users WHERE id = ?').get(personId);
+    if (!person) return res.status(404).type('text').send('Account not found');
+    await removeAccount(person.id);
+    res.redirect(303, '/admin/people');
   });
 
   admin.post('/people/:id/active', requireAdmin, async (req, res) => {
