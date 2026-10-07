@@ -28,25 +28,34 @@ const STAFF_LINKS = [
   ['people', '/admin/people', 'People', 'admin'],
 ];
 
-function layout({ title, body, user = null, active = '', wide = false }) {
+function layout({ title, body, user = null, active = '', wide = false, landing = false, staffLink = true }) {
   const current = (key) => (active === key ? ' aria-current="page"' : '');
   const links = STAFF_LINKS.filter(([, , , role]) => !role || role === user?.role)
     .map(([key, href, label]) => `<a href="${href}"${current(key)}>${label}</a>`)
     .join('');
+  const themeButton =
+    '<button type="button" class="icon-button" data-theme-toggle aria-label="Switch between light and dark theme" title="Light / dark">&#9680;</button>';
   const header = `<header class="site-header no-print">
   <div class="header-inner">
-    <a class="brand" href="${user ? '/admin' : '/'}"><img src="/logo.svg" alt="" width="30" height="30"><span>Item Check-out</span></a>
+    <a class="brand" href="${user ? '/admin' : '/'}"><img src="/logo.svg" alt="" width="28" height="28"><span>Item Check-out</span></a>
     ${
       user
         ? `<nav class="nav-links" aria-label="Staff">${links}</nav>
     <div class="nav-user">
       <a class="who" href="/admin/settings"${current('settings')}>${esc(user.name)}<span class="role-tag">${esc(user.role)}</span></a>
       <form method="post" action="/admin/logout"><button class="link-button">Log out</button></form>
+      ${themeButton}
     </div>`
-        : ''
+        : landing
+          ? `<nav class="nav-links" aria-label="Page"><a href="#how">How it works</a><a href="#features">Features</a><a href="#staff">For staff</a></nav>
+    <div class="nav-user">${themeButton}<a class="button primary small" href="/admin">Staff login</a></div>`
+          : `<div class="nav-user">${themeButton}${staffLink ? '<a class="button secondary small" href="/admin">Staff login</a>' : ''}</div>`
     }
   </div>
 </header>`;
+  const content = landing
+    ? `<main class="page landing">\n${body}\n</main>`
+    : `<div class="page"><main class="sheet ${wide ? 'wide' : 'narrow'}">\n${body}\n</main></div>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -57,12 +66,11 @@ function layout({ title, body, user = null, active = '', wide = false }) {
 <title>${esc(title)}</title>
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
+<script src="/theme.js"></script>
 </head>
 <body>
 ${header}
-<main class="${wide ? 'wide' : 'narrow'}">
-${body}
-</main>
+${content}
 </body>
 </html>`;
 }
@@ -77,18 +85,108 @@ function errorList(errors) {
 export function homePage() {
   return layout({
     title: 'Item check-out',
-    body: `<div class="hero">
-  <img src="/logo.svg" alt="" width="64" height="64">
-  <h1>Item check-out</h1>
-  <p>Scan the QR code on an item with your phone camera to check it out or return it.</p>
-</div>
-<form method="get" action="/find" class="card">
-  <label>Or type or scan the code printed under the barcode
-    <input type="text" name="code" autocomplete="off" autocapitalize="none" maxlength="40" required>
-  </label>
-  <button class="primary">Find item</button>
-</form>
-<p class="muted small center"><a href="/admin">Staff login</a></p>`,
+    landing: true,
+    body: `<section class="sheet hero-split">
+  <div class="hero-copy">
+    <div class="hero-band"><h1>Check out anything<br><span class="accent">with a scan.</span></h1></div>
+    <p class="lede">Scan the QR code on an item with your phone camera, fill in a short form, and it is logged. No app, no login.</p>
+    <form method="get" action="/find" class="find-form">
+      <label for="code-input">Have a code instead? Type or scan the code printed under the barcode.</label>
+      <div class="row">
+        <input id="code-input" type="text" name="code" autocomplete="off" autocapitalize="none" maxlength="40" placeholder="e.g. 0b6539c17b7d" required>
+        <button class="primary">Find item</button>
+      </div>
+      <p class="mono">Scanning with a phone? Just point the camera at the QR code.</p>
+    </form>
+  </div>
+  <div class="hero-art">
+    <canvas id="ink-canvas" aria-label="Decorative 3D sculpture. Drag to rotate, click to make a new one." role="img"></canvas>
+    <span class="corner tl">N 00&deg;</span>
+    <span class="corner tr">SCAN &middot; 3D</span>
+    <span class="corner bl">Drag to rotate &middot; Click to reforge</span>
+    <span class="corner br" id="ink-seed">seed 04211</span>
+  </div>
+</section>
+
+<section class="sheet section" id="how">
+  <div class="section-head">
+    <span class="pill">How it works</span>
+    <h2>Three steps, <span class="accent">no paperwork.</span></h2>
+  </div>
+  <div class="steps frame">
+    <div class="step"><span class="num">01</span><h3>Scan</h3><p>Point your phone camera at the QR code on the item. The form opens with the item already filled in.</p></div>
+    <div class="step"><span class="num">02</span><h3>Fill in</h3><p>Name, ID number, school email and a return date. You get a confirmation right away.</p></div>
+    <div class="step"><span class="num">03</span><h3>Return</h3><p>Scan the same code again and tap Return this item. That is all.</p></div>
+  </div>
+</section>
+
+<section class="sheet section" id="features">
+  <div class="section-head">
+    <span class="pill">Features</span>
+    <h2>Everything you lend, <span class="accent">accounted for.</span></h2>
+  </div>
+  <div class="bento">
+    <div class="bento-card frame">
+      <div class="bento-art">
+        <svg viewBox="0 0 260 130" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <rect x="92" y="14" width="76" height="102" rx="12"/>
+          <rect x="106" y="30" width="48" height="48" rx="4"/>
+          <path d="M112 36h12v12h-12zM136 36h12v12h-12zM112 60h12v12h-12z"/>
+          <path d="M136 62h4v4h-4zM144 66h4v4h-4zM136 70h4v4h-4z" fill="currentColor"/>
+          <path d="M112 92h36M118 100h24" stroke-linecap="round"/>
+          <path d="M40 40l28 20M220 40l-28 20M40 90l28-20M220 90l-28-20" stroke-dasharray="3 4" opacity=".5"/>
+        </svg>
+      </div>
+      <h3>Scan and done</h3>
+      <p>A 30-second form on any phone. The item is identified by the code, so there is nothing to look up.</p>
+    </div>
+    <div class="bento-card frame">
+      <div class="bento-art">
+        <div class="mini-list" aria-hidden="true">
+          <div class="mini-row"><span>Projector</span><span class="badge returned">Available</span></div>
+          <div class="mini-row"><span>Camera</span><span class="badge overdue-soft">Checked out</span></div>
+          <div class="mini-row"><span>Speaker</span><span class="badge overdue-soft">Checked out</span></div>
+        </div>
+      </div>
+      <h3>Never double-booked</h3>
+      <p>An item that is out shows as unavailable to everyone else, and nothing about who has it.</p>
+    </div>
+    <div class="bento-card frame">
+      <div class="bento-art">
+        <div class="mini-list" aria-hidden="true">
+          <div class="mini-row late"><span>Tripod &middot; due Mon</span><strong>Overdue</strong></div>
+          <div class="mini-row"><span>Table &middot; due Fri</span><span class="badge ontime">On time</span></div>
+          <div class="mini-row"><span>Speaker &middot; due Fri</span><span class="badge ontime">On time</span></div>
+        </div>
+      </div>
+      <h3>Overdue at a glance</h3>
+      <p>Staff see everything that is out, highlighted when late, with search, filters and CSV export.</p>
+    </div>
+    <div class="bento-card frame">
+      <div class="bento-art">
+        <svg viewBox="0 0 260 130" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <rect x="50" y="14" width="64" height="64" rx="6"/>
+          <path d="M58 22h16v16H58zM90 22h16v16H90zM58 54h16v16H58z"/>
+          <path d="M90 54h6v6h-6zM100 62h6v6h-6zM90 70h6v6h-6z" fill="currentColor"/>
+          <path d="M138 24v56M143 24v56M150 24v56M156 24v56M163 24v56M168 24v56M176 24v56M182 24v56" stroke-width="2"/>
+          <path d="M50 98h132" stroke-linecap="round" opacity=".5"/>
+          <path d="M50 108h90" stroke-linecap="round" opacity=".5"/>
+        </svg>
+      </div>
+      <h3>Labels in one click</h3>
+      <p>List an item and print its QR code and barcode right away. Teachers see only their own items.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sheet cta" id="staff">
+  <h2>Run a lending shelf? <span class="accent">Start in minutes.</span></h2>
+  <p>Teachers and administrators log in to list items, print labels, and see what is checked out.</p>
+  <div class="row"><a class="button primary" href="/admin">Staff login</a></div>
+</section>
+
+<p class="mono site-footer">Item Check-out &middot; for school organizations</p>
+<script src="/hero.js" defer></script>`,
   });
 }
 
@@ -198,6 +296,7 @@ export function returnedPage({ item }) {
 export function loginPage({ error, email = '', signupOpen = true } = {}) {
   return layout({
     title: 'Staff login',
+    staffLink: false,
     body: `<h1>Staff login</h1>
 ${error ? `<div class="alert error" role="alert">${esc(error)}</div>` : ''}
 <form method="post" action="/admin/login" class="card">
@@ -216,6 +315,7 @@ ${signupOpen ? '<p class="center"><a href="/admin/signup">Create an admin or tea
 export function signupPage({ errors = [], values = {} } = {}) {
   return layout({
     title: 'Create a staff account',
+    staffLink: false,
     body: `<h1>Create a staff account</h1>
 <p class="muted">For administrators and teachers. You need the sign-up code from your organization.</p>
 ${errorList(errors)}
