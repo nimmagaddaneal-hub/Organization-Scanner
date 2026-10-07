@@ -18,15 +18,40 @@ let tripod;
 
 const tomorrow = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleDateString('en-CA');
 
-const student = (overrides = {}) => ({
-  student_name: 'Test Student',
-  student_id: '100200',
-  email: 'test.student@example.edu',
-  phone: '',
-  due_date: tomorrow(),
-  purpose: 'Club photo day',
-  ...overrides,
-});
+let studentCount = 0;
+
+// Signs a new student up and returns their account and login cookie.
+async function studentSignup(overrides = {}) {
+  studentCount += 1;
+  const account = {
+    name: 'Test Student',
+    student_id: '100200',
+    email: `student${studentCount}@example.edu`,
+    password: 'student-pass-123',
+    ...overrides,
+  };
+  const response = await request('/student/signup', {
+    method: 'POST',
+    form: { ...account, phone: '', confirm_password: account.password, next: '/account' },
+  });
+  assert.equal(response.status, 303, `sign-up failed for ${account.email}`);
+  return { account, cookie: cookiesFrom(response) };
+}
+
+// A new student signs up and checks the item out. Accepts the old field names student_name and student_id.
+async function checkoutFor(item, { student_name, student_id, email, ...rest } = {}) {
+  const { account, cookie } = await studentSignup({
+    ...(student_name && { name: student_name }),
+    ...(student_id && { student_id }),
+    ...(email && { email }),
+  });
+  const response = await request(`/i/${item.code}/checkout`, {
+    method: 'POST',
+    cookie,
+    form: { due_date: tomorrow(), purpose: 'Club photo day', phone: '', ...rest },
+  });
+  return { response, cookie, account };
+}
 
 function request(path, { method = 'GET', form, cookie } = {}) {
   const headers = {};
@@ -76,12 +101,26 @@ after(() => {
   rmSync(dbFolder, { recursive: true, force: true });
 });
 
-test('scanned link opens the form with the item filled in', async () => {
-  const response = await request(`/i/${camera.code}`);
-  const html = await response.text();
-  assert.equal(response.status, 200);
+test('scanning while logged out asks to log in, then logged-in students get the form', async () => {
+  const loggedOut = await request(`/i/${camera.code}`);
+  const loggedOutHtml = await loggedOut.text();
+  assert.equal(loggedOut.status, 200);
+  assert.match(loggedOutHtml, /Log in to check this item out/);
+  assert.match(loggedOutHtml, new RegExp(`/student/login\\?next=%2Fi%2F${camera.code}`));
+  assert.doesNotMatch(loggedOutHtml, /name="due_date"/);
+
+  // Checking out without an account does nothing.
+  const blocked = await request(`/i/${camera.code}/checkout`, { method: 'POST', form: { due_date: tomorrow() } });
+  assert.equal(blocked.status, 303);
+  assert.match(blocked.headers.get('location'), /^\/student\/login/);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts').get()).n, 0);
+
+  const { cookie } = await studentSignup();
+  const html = await (await request(`/i/${camera.code}`, { cookie })).text();
   assert.match(html, /value="Test Camera" readonly/);
   assert.match(html, /name="due_date"/);
+  assert.match(html, /Checking out as/);
+  assert.doesNotMatch(html, /name="student_id"/);
 });
 
 test('unknown code shows "not found"', async () => {
@@ -90,25 +129,28 @@ test('unknown code shows "not found"', async () => {
 });
 
 test('form rejects missing and invalid fields', async () => {
+  const { cookie } = await studentSignup();
   const response = await request(`/i/${camera.code}/checkout`, {
     method: 'POST',
-    form: student({ student_name: '', email: 'not-an-email', due_date: '2000-01-01' }),
+    cookie,
+    form: { phone: 'abc', due_date: '2000-01-01' },
   });
   const html = await response.text();
   assert.equal(response.status, 400);
-  assert.match(html, /Enter your full name/);
-  assert.match(html, /valid email/);
+  assert.match(html, /valid phone number/);
   assert.match(html, /cannot be in the past/);
+  const noDate = await request(`/i/${camera.code}/checkout`, { method: 'POST', cookie, form: {} });
+  assert.match(await noDate.text(), /Choose an expected return date/);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts').get()).n, 0);
 });
 
 test('every admin route requires the login', async () => {
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete']) {
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete', '/admin/students', '/admin/demos']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/admin/login', path);
   }
-  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete']) {
+  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete', '/admin/students/1/active', '/admin/demos/1/status', '/admin/demos/1/delete']) {
     const response = await request(path, { method: 'POST', form: { name: 'x' } });
     assert.equal(response.status, 401, path);
   }
@@ -123,68 +165,72 @@ test('wrong admin password is rejected', async () => {
 });
 
 test('full flow: check out, dashboard, duplicate blocked, return', async () => {
-  // Student submits the form.
-  const submit = await request(`/i/${camera.code}/checkout`, { method: 'POST', form: student() });
+  // A student with an account submits the form.
+  const { response: submit, cookie: studentCookie } = await checkoutFor(camera, {
+    student_name: 'Test Student', student_id: '100200', email: 'test.student@example.edu',
+  });
   assert.equal(submit.status, 303);
-  const studentCookie = cookiesFrom(submit);
 
   // Confirmation screen.
   const confirmation = await (await request(submit.headers.get('location'), { cookie: studentCookie })).text();
   assert.match(confirmation, /You're all set/);
 
-  // Admin dashboard lists it.
+  // Admin dashboard lists it, with the account marker.
   const adminCookie = await adminLogin();
   const dashboard = await (await request('/admin', { cookie: adminCookie })).text();
   assert.match(dashboard, /Test Camera/);
   assert.match(dashboard, /Test Student/);
   assert.match(dashboard, /100200/);
   assert.match(dashboard, /On time/);
+  assert.match(dashboard, /Account/);
+  const linked = (await db.prepare("SELECT student_account_id FROM checkouts WHERE student_id = '100200'").get()).student_account_id;
+  assert.ok(linked);
 
   // A different student scans it: unavailable, and no personal data shown.
-  const other = await (await request(`/i/${camera.code}`)).text();
+  const { cookie: otherCookie } = await studentSignup({ name: 'Other Person', student_id: '999', email: 'other@example.edu' });
+  const other = await (await request(`/i/${camera.code}`, { cookie: otherCookie })).text();
   assert.match(other, /Unavailable/);
   assert.doesNotMatch(other, /Test Student|100200|test\.student@example\.edu/);
+  assert.doesNotMatch(await (await request(`/i/${camera.code}`)).text(), /Test Student|100200/);
 
   // A duplicate check-out is refused.
-  const duplicate = await request(`/i/${camera.code}/checkout`, {
-    method: 'POST',
-    form: student({ student_name: 'Other Person', student_id: '999', email: 'other@example.edu' }),
-  });
+  const duplicate = await request(`/i/${camera.code}/checkout`, { method: 'POST', cookie: otherCookie, form: { due_date: tomorrow() } });
   assert.equal(duplicate.status, 409);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE returned_at IS NULL').get()).n, 1);
 
-  // A different student cannot return it with wrong details.
-  const wrongReturn = await request(`/i/${camera.code}/return`, {
-    method: 'POST',
-    form: { student_id: '999', email: 'other@example.edu' },
-  });
-  assert.equal(wrongReturn.status, 403);
+  // A different student cannot return it. Logged out, they are sent to log in.
+  assert.equal((await request(`/i/${camera.code}/return`, { method: 'POST', cookie: otherCookie })).status, 403);
+  assert.equal((await request(`/i/${camera.code}/return`, { method: 'POST' })).status, 303);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE returned_at IS NULL').get()).n, 1);
 
-  // The same student scans again: "Return this item" is offered.
+  // The same student scans again: "Return this item" is offered, and My items lists it.
   const own = await (await request(`/i/${camera.code}`, { cookie: studentCookie })).text();
   assert.match(own, /You have this item checked out/);
   assert.match(own, /Return this item/);
+  assert.match(await (await request('/account', { cookie: studentCookie })).text(), /Test Camera/);
 
   // The student returns it.
   const returned = await request(`/i/${camera.code}/return`, { method: 'POST', cookie: studentCookie });
   assert.match(await returned.text(), /Returned/);
 
   // The item is available again, and the dashboard no longer lists it.
-  assert.match(await (await request(`/i/${camera.code}`)).text(), /name="student_name"/);
+  assert.match(await (await request(`/i/${camera.code}`, { cookie: studentCookie })).text(), /name="due_date"/);
   assert.doesNotMatch(await (await request('/admin', { cookie: adminCookie })).text(), /Test Student/);
 
   // History keeps the record.
   const history = await (await request('/admin/history', { cookie: adminCookie })).text();
   assert.match(history, /Test Student/);
   assert.match(history, /Returned/);
+  assert.match(await (await request('/account', { cookie: studentCookie })).text(), /History/);
 });
 
-test('student can return from another phone with student ID and email', async () => {
-  await request(`/i/${tripod.code}/checkout`, { method: 'POST', form: student({ student_id: 'AB-77' }) });
-  const response = await request(`/i/${tripod.code}/return`, {
-    method: 'POST',
-    form: { student_id: 'ab-77', email: 'Test.Student@example.edu' },
-  });
+test('a student can return from another phone by logging in', async () => {
+  const { account } = await checkoutFor(tripod, { student_id: 'AB-77' });
+  const login = await request('/student/login', { method: 'POST', form: { email: account.email, password: account.password, next: `/i/${tripod.code}` } });
+  assert.equal(login.status, 303);
+  assert.equal(login.headers.get('location'), `/i/${tripod.code}`);
+  const secondPhone = cookiesFrom(login);
+  const response = await request(`/i/${tripod.code}/return`, { method: 'POST', cookie: secondPhone });
   assert.equal(response.status, 200);
   assert.match(await response.text(), /Returned/);
 });
@@ -192,8 +238,8 @@ test('student can return from another phone with student ID and email', async ()
 test('admin: mark returned, overdue highlight, search, filter, CSV, items, QR', async () => {
   const adminCookie = await adminLogin();
 
-  await request(`/i/${camera.code}/checkout`, { method: 'POST', form: student({ student_name: 'Late Larry', student_id: '555' }) });
-  await request(`/i/${tripod.code}/checkout`, { method: 'POST', form: student({ student_name: 'Punctual Pat', student_id: '666' }) });
+  await checkoutFor(camera, { student_name: 'Late Larry', student_id: '555' });
+  await checkoutFor(tripod, { student_name: 'Punctual Pat', student_id: '666' });
   // Make the camera check-out overdue.
   (await db.prepare("UPDATE checkouts SET due_date = '2020-01-01' WHERE student_id = '555'").run());
 
@@ -309,8 +355,8 @@ test('teacher lists an item, gets a code, and sees only their own items and chec
   assert.equal(found.headers.get('location'), `/i/${microscope.code}`);
 
   // One check-out on the teacher's item, one on an organization item.
-  await request(`/i/${microscope.code}/checkout`, { method: 'POST', form: student({ student_name: 'Micro Mia', student_id: '777' }) });
-  await request(`/i/${camera.code}/checkout`, { method: 'POST', form: student({ student_name: 'Camera Cam', student_id: '888' }) });
+  await checkoutFor(microscope, { student_name: 'Micro Mia', student_id: '777' });
+  await checkoutFor(camera, { student_name: 'Camera Cam', student_id: '888' });
 
   for (const path of ['/admin', '/admin/history', '/admin/export.csv?scope=all', '/admin/items', '/admin/qr']) {
     const page = await (await request(path, { cookie: teacherCookie })).text();
@@ -358,7 +404,7 @@ test('deleting an item: confirmation, blocked while checked out, owner only', as
   assert.ok((await db.prepare('SELECT id FROM items WHERE id = ?').get(easel.id)));
 
   // While a student holds it, deleting is refused.
-  await request(`/i/${easel.code}/checkout`, { method: 'POST', form: student({ student_name: 'Easel Eve', student_id: '4242' }) });
+  await checkoutFor(easel, { student_name: 'Easel Eve', student_id: '4242' });
   const blocked = await request(`/admin/items/${easel.id}/delete`, { method: 'POST', cookie: adminCookie });
   assert.equal(blocked.status, 409);
   assert.ok((await db.prepare('SELECT id FROM items WHERE id = ?').get(easel.id)));
@@ -405,7 +451,7 @@ test('delete accounts: own account, other accounts, last admin protected', async
   const teacherCookie = cookiesFrom(await signUp(teacher, TEACHER_CODE));
   await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Orphan Drum' } });
   const drum = (await db.prepare("SELECT * FROM items WHERE name = 'Orphan Drum'").get());
-  await request(`/i/${drum.code}/checkout`, { method: 'POST', form: student({ student_name: 'Drum Dan', student_id: '31337' }) });
+  await checkoutFor(drum, { student_name: 'Drum Dan', student_id: '31337' });
 
   assert.equal((await request('/admin/settings/delete', { method: 'POST', cookie: teacherCookie, form: { password: 'wrong-password-x' } })).status, 403);
   assert.ok((await db.prepare('SELECT id FROM users WHERE email = ?').get(teacher.email)));
@@ -439,4 +485,132 @@ test('delete accounts: own account, other accounts, last admin protected', async
   // Deleting yourself through the People route is redirected to the safe flow.
   assert.equal((await request(`/admin/people/${adminId}/delete`, { method: 'POST', cookie: adminCookie })).headers.get('location'), '/admin/settings/delete');
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE id = ?').get(adminId)).n, 1);
+});
+
+test('student accounts: sign-up checks, login, safe redirect, separate sessions', async () => {
+  const good = { name: 'Sam Student', student_id: '12345', email: 'sam@example.edu', phone: '', password: 'student-pass-123', confirm_password: 'student-pass-123' };
+  const post = (form) => request('/student/signup', { method: 'POST', form });
+
+  for (const [override, message] of [
+    [{ name: '' }, /full name/],
+    [{ student_id: '' }, /student ID/],
+    [{ student_id: 'bad id!' }, /letters, numbers and dashes/],
+    [{ email: 'nope' }, /valid email/],
+    [{ password: 'short', confirm_password: 'short' }, /8 characters/],
+    [{ confirm_password: 'different-pass-1' }, /do not match/],
+    [{ phone: 'abc' }, /phone/],
+  ]) {
+    const response = await post({ ...good, ...override });
+    assert.equal(response.status, 400);
+    assert.match(await response.text(), message);
+  }
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM students WHERE email = ?').get(good.email)).n, 0);
+
+  // Success. The password is stored only as a hash.
+  const created = await post({ ...good, next: '/i/not-a-real-place-/../' });
+  assert.equal(created.status, 303);
+  assert.equal(created.headers.get('location'), '/account');
+  const stored = await db.prepare('SELECT * FROM students WHERE email = ?').get(good.email);
+  assert.doesNotMatch(stored.password_hash, /student-pass-123/);
+  assert.equal((await post(good)).status, 400);
+
+  // Login: wrong password, then right; only our own paths are valid places to go next.
+  const login = (form) => request('/student/login', { method: 'POST', form });
+  assert.equal((await login({ email: good.email, password: 'wrong-password-1' })).status, 401);
+  assert.equal((await login({ email: 'ghost@example.edu', password: 'wrong-password-1' })).status, 401);
+  const ok = await login({ email: good.email, password: good.password, next: 'https://evil.example/' });
+  assert.equal(ok.status, 303);
+  assert.equal(ok.headers.get('location'), '/account');
+  const cookie = cookiesFrom(ok);
+
+  // A student login is not a staff login, and a staff login is not a student login.
+  assert.equal((await request('/admin', { cookie })).status, 302);
+  const adminCookie = await adminLogin();
+  assert.equal((await request('/account', { cookie: adminCookie })).status, 302);
+  const forged = adminCookie.replace('admin_session', 'student_session');
+  assert.equal((await request('/account', { cookie: forged })).status, 302);
+
+  // Logging out ends the session. A deactivated account is logged out at once.
+  const loggedOut = await request('/student/logout', { method: 'POST', cookie });
+  assert.equal(loggedOut.status, 303);
+  assert.equal((await request('/account', { cookie: cookiesFrom(await login({ email: good.email, password: good.password })) + '' })).status, 200);
+  const again = cookiesFrom(await login({ email: good.email, password: good.password }));
+  await db.prepare('UPDATE students SET active = 0 WHERE email = ?').run(good.email);
+  assert.equal((await request('/account', { cookie: again })).status, 302);
+  assert.equal((await login({ email: good.email, password: good.password })).status, 401);
+});
+
+test('admins see student accounts and can deactivate them; teachers cannot', async () => {
+  const adminCookie = await adminLogin();
+  const { account } = await studentSignup({ name: 'Findable Fran', student_id: '8080' });
+  const page = await (await request('/admin/students?q=findable', { cookie: adminCookie })).text();
+  assert.match(page, /Findable Fran/);
+  assert.match(page, /8080/);
+  assert.doesNotMatch(page, /password_hash|scrypt/);
+
+  const teacherCookie = cookiesFrom(await signUp({ name: 'Plain Teacher', email: 'plain.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+  assert.equal((await request('/admin/students', { cookie: teacherCookie })).status, 403);
+  assert.equal((await request('/admin/demos', { cookie: teacherCookie })).status, 403);
+
+  const id = (await db.prepare('SELECT id FROM students WHERE email = ?').get(account.email)).id;
+  assert.equal((await request(`/admin/students/${id}/active`, { method: 'POST', cookie: teacherCookie, form: { active: '0' } })).status, 403);
+  assert.equal((await request(`/admin/students/${id}/active`, { method: 'POST', cookie: adminCookie, form: { active: '0' } })).status, 303);
+  assert.equal((await db.prepare('SELECT active FROM students WHERE id = ?').get(id)).active, 0);
+});
+
+test('demo requests: saved, validated, spam-resistant, admin only', async () => {
+  const send = (form) => request('/demo', { method: 'POST', form });
+  const valid = { name: 'Dana Director', email: 'dana@otherschool.org', school: 'Other High School', role: 'Librarian', message: 'Cameras and laptops' };
+
+  const home = await (await request('/')).text();
+  assert.match(home, /action="\/demo"/);
+  assert.match(home, /Request a demo/);
+
+  // Missing fields are refused and nothing is saved.
+  const bad = await send({ ...valid, name: '', email: 'nope', school: '' });
+  assert.equal(bad.status, 400);
+  const badHtml = await bad.text();
+  assert.match(badHtml, /Enter your name/);
+  assert.match(badHtml, /valid email/);
+  assert.match(badHtml, /school or organization/);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests').get()).n, 0);
+
+  // A valid request is saved and shows a thank-you.
+  const ok = await send(valid);
+  assert.equal(ok.status, 303);
+  assert.equal(ok.headers.get('location'), '/?demo=sent#demo');
+  assert.match(await (await request('/?demo=sent')).text(), /Request received/);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests').get()).n, 1);
+
+  // The hidden field catches bots: fake success, nothing saved.
+  assert.equal((await send({ ...valid, website: 'http://spam.example' })).status, 303);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests').get()).n, 1);
+
+  // Admins read and manage requests. Text is escaped.
+  await send({ ...valid, school: '<script>alert(1)</script>' });
+  const adminCookie = await adminLogin();
+  const list = await (await request('/admin/demos', { cookie: adminCookie })).text();
+  assert.match(list, /Other High School/);
+  assert.match(list, /dana@otherschool\.org/);
+  assert.doesNotMatch(list, /<script>alert/);
+  const id = (await db.prepare("SELECT id FROM demo_requests WHERE school = 'Other High School'").get()).id;
+  await request(`/admin/demos/${id}/status`, { method: 'POST', cookie: adminCookie, form: { status: 'contacted' } });
+  assert.equal((await db.prepare('SELECT status FROM demo_requests WHERE id = ?').get(id)).status, 'contacted');
+  await request(`/admin/demos/${id}/delete`, { method: 'POST', cookie: adminCookie });
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests WHERE id = ?').get(id)).n, 0);
+
+  // Too many requests from one address are limited.
+  let last;
+  for (let i = 0; i < 6; i++) last = await send({ ...valid, school: `School ${i}` });
+  assert.equal(last.status, 429);
+});
+
+test('wrong student passwords lock only that account, not everyone on the same network', async () => {
+  const victim = (await studentSignup({ email: 'victim@example.edu' })).account;
+  const bystander = (await studentSignup({ email: 'bystander@example.edu' })).account;
+  const login = (account, password) =>
+    request('/student/login', { method: 'POST', form: { email: account.email, password } });
+  for (let i = 0; i < 8; i++) assert.equal((await login(victim, 'wrong-password-1')).status, 401);
+  assert.equal((await login(victim, victim.password)).status, 429);
+  assert.equal((await login(bystander, bystander.password)).status, 303);
 });

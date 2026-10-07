@@ -25,16 +25,22 @@ const STAFF_LINKS = [
   ['history', '/admin/history', 'History'],
   ['items', '/admin/items', 'Items'],
   ['codes', '/admin/qr', 'Codes'],
+  ['students', '/admin/students', 'Students', 'admin'],
+  ['demos', '/admin/demos', 'Demos', 'admin'],
   ['people', '/admin/people', 'People', 'admin'],
 ];
 
-function layout({ title, body, user = null, active = '', wide = false, landing = false, staffLink = true }) {
+function layout({ title, body, user = null, student = null, active = '', wide = false, landing = false }) {
   const current = (key) => (active === key ? ' aria-current="page"' : '');
   const links = STAFF_LINKS.filter(([, , , role]) => !role || role === user?.role)
     .map(([key, href, label]) => `<a href="${href}"${current(key)}>${label}</a>`)
     .join('');
   const themeButton =
     '<button type="button" class="icon-button" data-theme-toggle aria-label="Switch between light and dark theme" title="Light / dark">&#9680;</button>';
+  const studentMenu = student
+    ? `<a class="who" href="/account">${esc(student.name)}</a>
+      <form method="post" action="/student/logout"><button class="link-button">Log out</button></form>`
+    : '<a class="button secondary small" href="/student/login">Log in</a>';
   const header = `<header class="site-header no-print">
   <div class="header-inner">
     <a class="brand" href="${user ? '/admin' : '/'}"><img src="/logo.svg" alt="" width="28" height="28"><span>Item Check-out</span></a>
@@ -47,9 +53,9 @@ function layout({ title, body, user = null, active = '', wide = false, landing =
       ${themeButton}
     </div>`
         : landing
-          ? `<nav class="nav-links" aria-label="Page"><a href="#how">How it works</a><a href="#features">Features</a><a href="#staff">For staff</a></nav>
-    <div class="nav-user">${themeButton}<a class="button primary small" href="/admin">Staff login</a></div>`
-          : `<div class="nav-user">${themeButton}${staffLink ? '<a class="button secondary small" href="/admin">Staff login</a>' : ''}</div>`
+          ? `<nav class="nav-links" aria-label="Page"><a href="#how">How it works</a><a href="#features">Features</a><a href="#demo">For schools</a></nav>
+    <div class="nav-user">${themeButton}${studentMenu}<a class="button primary small" href="#demo">Request a demo</a></div>`
+          : `<div class="nav-user">${themeButton}${studentMenu}</div>`
     }
   </div>
 </header>`;
@@ -82,21 +88,55 @@ function errorList(errors) {
 
 // ---------- Student pages ----------
 
-export function homePage() {
+function demoForm({ values = {}, errors = [] } = {}) {
+  return `${errorList(errors)}
+<form method="post" action="/demo" class="demo-form" novalidate>
+  <div class="hp" aria-hidden="true"><label>Leave this empty <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>
+  <div class="two-col">
+    <label>Your name <span class="required">*</span>
+      <input type="text" name="name" value="${esc(values.name)}" autocomplete="name" maxlength="100" required>
+    </label>
+    <label>Work email <span class="required">*</span>
+      <input type="email" name="email" value="${esc(values.email)}" autocomplete="email" maxlength="254" required>
+    </label>
+  </div>
+  <div class="two-col">
+    <label>School or organization <span class="required">*</span>
+      <input type="text" name="school" value="${esc(values.school)}" autocomplete="organization" maxlength="150" required>
+    </label>
+    <label>Your role <span class="muted">(optional)</span>
+      <input type="text" name="role" value="${esc(values.role)}" maxlength="100" placeholder="Teacher, librarian, IT&hellip;">
+    </label>
+  </div>
+  <label>What would you like to lend out? <span class="muted">(optional)</span>
+    <textarea name="message" rows="3" maxlength="1000">${esc(values.message)}</textarea>
+  </label>
+  <button class="primary">Request a demo</button>
+</form>`;
+}
+
+export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
   return layout({
     title: 'Item check-out',
     landing: true,
+    student,
     body: `<section class="sheet hero-split">
   <div class="hero-copy">
     <div class="hero-band"><h1>Check out anything<br><span class="accent">with a scan.</span></h1></div>
-    <p class="lede">Scan the QR code on an item with your phone camera, fill in a short form, and it is logged. No app, no login.</p>
+    <p class="lede">Create a student account once. Then scan an item's QR code, confirm the details, and it is logged under your name.</p>
+    <div class="hero-actions">
+      ${
+        student
+          ? '<a class="button primary" href="/account">My items</a>'
+          : '<a class="button primary" href="/student/signup">Create student account</a><a class="button secondary" href="/student/login">Log in</a>'
+      }
+    </div>
     <form method="get" action="/find" class="find-form">
       <label for="code-input">Have a code instead? Type or scan the code printed under the barcode.</label>
       <div class="row">
         <input id="code-input" type="text" name="code" autocomplete="off" autocapitalize="none" maxlength="40" placeholder="e.g. 0b6539c17b7d" required>
-        <button class="primary">Find item</button>
+        <button class="secondary">Find item</button>
       </div>
-      <p class="mono">Scanning with a phone? Just point the camera at the QR code.</p>
     </form>
   </div>
   <div class="hero-art">
@@ -114,9 +154,9 @@ export function homePage() {
     <h2>Three steps, <span class="accent">no paperwork.</span></h2>
   </div>
   <div class="steps frame">
-    <div class="step"><span class="num">01</span><h3>Scan</h3><p>Point your phone camera at the QR code on the item. The form opens with the item already filled in.</p></div>
-    <div class="step"><span class="num">02</span><h3>Fill in</h3><p>Name, ID number, school email and a return date. You get a confirmation right away.</p></div>
-    <div class="step"><span class="num">03</span><h3>Return</h3><p>Scan the same code again and tap Return this item. That is all.</p></div>
+    <div class="step"><span class="num">01</span><h3>Create an account</h3><p>Name, ID number and school email, once. After that you stay logged in on your phone.</p></div>
+    <div class="step"><span class="num">02</span><h3>Scan and confirm</h3><p>Point your camera at the item's QR code. Your details are filled in. Pick a return date.</p></div>
+    <div class="step"><span class="num">03</span><h3>Return</h3><p>Scan the code again, or open My items, and tap Return this item.</p></div>
   </div>
 </section>
 
@@ -138,7 +178,19 @@ export function homePage() {
         </svg>
       </div>
       <h3>Scan and done</h3>
-      <p>A 30-second form on any phone. The item is identified by the code, so there is nothing to look up.</p>
+      <p>Your details come from your account, so a check-out takes a few seconds and one date.</p>
+    </div>
+    <div class="bento-card frame">
+      <div class="bento-art">
+        <svg viewBox="0 0 260 130" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <rect x="62" y="26" width="136" height="78" rx="10"/>
+          <circle cx="102" cy="58" r="12"/>
+          <path d="M82 90c2-14 12-20 20-20s18 6 20 20" stroke-linecap="round"/>
+          <path d="M138 52h42M138 64h42M138 76h26" stroke-linecap="round" opacity=".6"/>
+        </svg>
+      </div>
+      <h3>Every check-out has a name</h3>
+      <p>Each check-out is tied to a student account, so staff always see who has what.</p>
     </div>
     <div class="bento-card frame">
       <div class="bento-art">
@@ -160,28 +212,29 @@ export function homePage() {
         </div>
       </div>
       <h3>Overdue at a glance</h3>
-      <p>Staff see everything that is out, highlighted when late, with search, filters and CSV export.</p>
-    </div>
-    <div class="bento-card frame">
-      <div class="bento-art">
-        <svg viewBox="0 0 260 130" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-          <rect x="50" y="14" width="64" height="64" rx="6"/>
-          <path d="M58 22h16v16H58zM90 22h16v16H90zM58 54h16v16H58z"/>
-          <path d="M90 54h6v6h-6zM100 62h6v6h-6zM90 70h6v6h-6z" fill="currentColor"/>
-          <path d="M138 24v56M143 24v56M150 24v56M156 24v56M163 24v56M168 24v56M176 24v56M182 24v56" stroke-width="2"/>
-          <path d="M50 98h132" stroke-linecap="round" opacity=".5"/>
-          <path d="M50 108h90" stroke-linecap="round" opacity=".5"/>
-        </svg>
-      </div>
-      <h3>Labels in one click</h3>
-      <p>List an item and print its QR code and barcode right away. Teachers see only their own items.</p>
+      <p>Staff see everything that is out, highlighted when late, with search, CSV export and printable QR labels.</p>
     </div>
   </div>
 </section>
 
+<section class="sheet section" id="demo">
+  <div class="section-head">
+    <span class="pill">For schools</span>
+    <h2>Want this at your school? <span class="accent">Ask for a demo.</span></h2>
+    <p class="muted demo-note">We set up each school ourselves. Send a request and we will get back to you with a walkthrough and staff sign-up.</p>
+  </div>
+  <div class="demo-card frame">
+    ${
+      demoSent
+        ? '<div class="alert success" role="status"><strong>Request received.</strong> Thank you. We will email you soon.</div>'
+        : demoForm(demo)
+    }
+  </div>
+</section>
+
 <section class="sheet cta" id="staff">
-  <h2>Run a lending shelf? <span class="accent">Start in minutes.</span></h2>
-  <p>Teachers and administrators log in to list items, print labels, and see what is checked out.</p>
+  <h2>Already set up? <span class="accent">Staff, log in.</span></h2>
+  <p>Teachers and administrators list items, print labels, and see what is checked out.</p>
   <div class="row"><a class="button primary" href="/admin">Staff login</a></div>
 </section>
 
@@ -190,16 +243,93 @@ export function homePage() {
   });
 }
 
-export function messagePage({ title, message, status = 'info' }) {
+export function messagePage({ title, message, status = 'info', student = null }) {
   return layout({
     title,
+    student,
     body: `<div class="card center"><h1>${esc(title)}</h1><p class="alert ${esc(status)}">${esc(message)}</p></div>`,
   });
 }
 
-export function checkoutFormPage({ item, values = {}, errors = [], today, now, emailDomain }) {
+function studentFields({ values = {}, emailDomain = '' } = {}) {
+  return `<label>Full name <span class="required">*</span>
+    <input type="text" name="name" value="${esc(values.name)}" autocomplete="name" maxlength="100" required>
+  </label>
+  <label>Student ID number (lunch number) <span class="required">*</span>
+    <input type="text" name="student_id" value="${esc(values.student_id)}" inputmode="numeric" autocomplete="off" maxlength="20" required>
+  </label>
+  <label>School email <span class="required">*</span>
+    <input type="email" name="email" value="${esc(values.email)}" autocomplete="username" maxlength="254" required
+      ${emailDomain ? `placeholder="name@${esc(emailDomain)}"` : ''}>
+  </label>
+  <label>Phone number <span class="muted">(optional)</span>
+    <input type="tel" name="phone" value="${esc(values.phone)}" autocomplete="tel" maxlength="30">
+  </label>`;
+}
+
+export function studentLoginPage({ error, email = '', next = '/account' } = {}) {
+  return layout({
+    title: 'Student log in',
+    body: `<h1>Student log in</h1>
+<p class="page-sub">Log in to check items out and return them.</p>
+${error ? `<div class="alert error" role="alert">${esc(error)}</div>` : ''}
+<form method="post" action="/student/login" class="card">
+  <input type="hidden" name="next" value="${esc(next)}">
+  <label>School email
+    <input type="email" name="email" value="${esc(email)}" autocomplete="username" maxlength="254" required autofocus>
+  </label>
+  <label>Password
+    <input type="password" name="password" autocomplete="current-password" required>
+  </label>
+  <button class="primary">Log in</button>
+</form>
+<p class="center">New here? <a href="/student/signup?next=${esc(encodeURIComponent(next))}">Create a student account</a></p>
+<p class="center muted small">Teacher or administrator? <a href="/admin">Staff login</a></p>`,
+  });
+}
+
+export function studentSignupPage({ errors = [], values = {}, next = '/account', emailDomain = '' } = {}) {
+  return layout({
+    title: 'Create a student account',
+    body: `<h1>Create a student account</h1>
+<p class="page-sub">You only do this once. Staff can see your name, ID number and email on your check-outs.</p>
+${errorList(errors)}
+<form method="post" action="/student/signup" class="card" novalidate>
+  <input type="hidden" name="next" value="${esc(next)}">
+  ${studentFields({ values, emailDomain })}
+  <label>Password <span class="muted">(8 characters or more)</span>
+    <input type="password" name="password" autocomplete="new-password" minlength="8" maxlength="200" required>
+  </label>
+  <label>Confirm password
+    <input type="password" name="confirm_password" autocomplete="new-password" minlength="8" maxlength="200" required>
+  </label>
+  <button class="primary">Create account</button>
+</form>
+<p class="center">Already have an account? <a href="/student/login?next=${esc(encodeURIComponent(next))}">Log in</a></p>`,
+  });
+}
+
+// Shown when someone scans an item without being logged in.
+export function loginRequiredPage({ item }) {
+  const next = encodeURIComponent(`/i/${item.code}`);
+  return layout({
+    title: `Log in to check out ${item.name}`,
+    body: `<div class="card center">
+<h1>${esc(item.name)}</h1>
+${item.description ? `<p class="muted">${esc(item.description)}</p>` : ''}
+<div class="alert info" role="status">Log in to check this item out, or to return it.</div>
+<div class="stack">
+  <a class="button primary" href="/student/login?next=${next}">Log in</a>
+  <a class="button secondary" href="/student/signup?next=${next}">Create a student account</a>
+</div>
+</div>`,
+  });
+}
+
+export function checkoutFormPage({ item, student, values = {}, errors = [], today, now }) {
   return layout({
     title: `Check out: ${item.name}`,
+    student,
     body: `<h1>Check out an item</h1>
 ${errorList(errors)}
 <form method="post" action="/i/${esc(item.code)}/checkout" class="card" novalidate>
@@ -210,18 +340,13 @@ ${errorList(errors)}
   <label>Check-out date and time
     <input type="text" value="${esc(formatDateTime(now))}" readonly>
   </label>
-  <label>Full name <span class="required">*</span>
-    <input type="text" name="student_name" value="${esc(values.student_name)}" autocomplete="name" maxlength="100" required>
-  </label>
-  <label>Student ID number (lunch number) <span class="required">*</span>
-    <input type="text" name="student_id" value="${esc(values.student_id)}" inputmode="numeric" autocomplete="off" maxlength="20" required>
-  </label>
-  <label>School email <span class="required">*</span>
-    <input type="email" name="email" value="${esc(values.email)}" autocomplete="email" maxlength="254" required
-      ${emailDomain ? `placeholder="name@${esc(emailDomain)}"` : ''}>
-  </label>
+  <div class="account-box">
+    <div class="mono">Checking out as</div>
+    <strong>${esc(student.name)}</strong>
+    <div class="muted small">ID ${esc(student.student_id)} &middot; ${esc(student.email)}</div>
+  </div>
   <label>Phone number <span class="muted">(optional)</span>
-    <input type="tel" name="phone" value="${esc(values.phone)}" autocomplete="tel" maxlength="30">
+    <input type="tel" name="phone" value="${esc(values.phone ?? student.phone)}" autocomplete="tel" maxlength="30">
   </label>
   <label>Expected return date <span class="required">*</span>
     <input type="date" name="due_date" value="${esc(values.due_date)}" min="${esc(today)}" required>
@@ -234,13 +359,14 @@ ${errorList(errors)}
   });
 }
 
-// Shown to the student who holds the item (recognised by this phone's cookie).
-export function ownCheckoutPage({ item, checkout, justCheckedOut }) {
+// Shown to the student who holds the item.
+export function ownCheckoutPage({ item, student, checkout, justCheckedOut }) {
   const heading = justCheckedOut
     ? `<div class="alert success" role="status"><strong>You're all set!</strong> Your check-out is recorded.</div>`
     : `<div class="alert info">You have this item checked out.</div>`;
   return layout({
     title: justCheckedOut ? 'Check-out confirmed' : `Return: ${item.name}`,
+    student,
     body: `<div class="card center">
 <h1>${esc(item.name)}</h1>
 ${heading}
@@ -248,46 +374,86 @@ ${heading}
   <dt>Checked out</dt><dd>${esc(formatDateTime(checkout.checked_out_at))}</dd>
   <dt>Return by</dt><dd>${esc(formatDate(checkout.due_date))}</dd>
 </dl>
-<p class="muted">${justCheckedOut ? 'When you bring it back, scan the same code again to return it.' : 'Bringing it back now?'}</p>
+<p class="muted">${justCheckedOut ? 'When you bring it back, scan the same code again or open My items.' : 'Bringing it back now?'}</p>
 <form method="post" action="/i/${esc(item.code)}/return">
   <button class="${justCheckedOut ? 'secondary' : 'primary'}">Return this item</button>
 </form>
+<p class="small"><a href="/account">My items</a></p>
 </div>`,
   });
 }
 
 // Shown to everyone else. Shows nothing about who has the item.
-export function unavailablePage({ item, errors = [] }) {
+export function unavailablePage({ item, student = null }) {
   return layout({
     title: `Unavailable: ${item.name}`,
+    student,
     body: `<div class="card center">
 <h1>${esc(item.name)}</h1>
 <div class="alert warning" role="status"><strong>Unavailable.</strong> This item is already checked out.</div>
-</div>
-<details class="card" ${errors.length ? 'open' : ''}>
-  <summary>I checked this out. Return this item</summary>
-  <p class="muted small">Enter the same student ID (lunch number) and email you used at check-out.</p>
-  ${errorList(errors)}
-  <form method="post" action="/i/${esc(item.code)}/return" novalidate>
-    <label>Student ID number (lunch number)
-      <input type="text" name="student_id" inputmode="numeric" autocomplete="off" maxlength="20" required>
-    </label>
-    <label>School email
-      <input type="email" name="email" autocomplete="email" maxlength="254" required>
-    </label>
-    <button class="primary">Return this item</button>
-  </form>
-</details>`,
+${
+  student
+    ? ''
+    : `<p class="muted small">Did you check it out? <a href="/student/login?next=${esc(encodeURIComponent(`/i/${item.code}`))}">Log in to return it</a>.</p>`
+}
+</div>`,
   });
 }
 
-export function returnedPage({ item }) {
+export function returnedPage({ item, student = null }) {
   return layout({
     title: 'Item returned',
+    student,
     body: `<div class="card center">
 <h1>${esc(item.name)}</h1>
 <div class="alert success" role="status"><strong>Returned.</strong> Thank you!</div>
+<p class="small"><a href="/account">My items</a></p>
 </div>`,
+  });
+}
+
+export function accountPage({ student, open, history, today }) {
+  const dueBadge = (row) =>
+    row.due_date < today ? '<span class="badge overdue">Overdue</span>' : '<span class="badge ontime">On time</span>';
+  return layout({
+    title: 'My items',
+    student,
+    wide: true,
+    body: `<div class="page-head"><div><h1>My items</h1><p class="page-sub">${esc(student.name)} &middot; ID ${esc(student.student_id)} &middot; ${esc(student.email)}</p></div></div>
+<h2>Checked out now</h2>
+${
+  open.length
+    ? `<div class="table-wrap"><table>
+<thead><tr><th>Item</th><th>Checked out</th><th>Return by</th><th>Status</th><th></th></tr></thead>
+<tbody>
+${open
+  .map(
+    (row) => `<tr class="${row.due_date < today ? 'row-overdue' : ''}">
+  <td>${esc(row.item_name)}</td>
+  <td>${esc(formatDateTime(row.checked_out_at))}</td>
+  <td>${esc(formatDate(row.due_date))}</td>
+  <td>${dueBadge(row)}</td>
+  <td><form method="post" action="/i/${esc(row.item_code)}/return"><button class="secondary small">Return</button></form></td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+    : '<p class="card empty">You have nothing checked out. Scan an item\'s QR code to check it out.</p>'
+}
+<h2>History</h2>
+${
+  history.length
+    ? `<div class="table-wrap"><table>
+<thead><tr><th>Item</th><th>Checked out</th><th>Returned</th></tr></thead>
+<tbody>
+${history
+  .map(
+    (row) => `<tr><td>${esc(row.item_name)}</td><td>${esc(formatDateTime(row.checked_out_at))}</td><td>${esc(formatDateTime(row.returned_at))}</td></tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+    : '<p class="card empty">No past check-outs yet.</p>'
+}`,
   });
 }
 
@@ -296,7 +462,6 @@ export function returnedPage({ item }) {
 export function loginPage({ error, email = '', signupOpen = true } = {}) {
   return layout({
     title: 'Staff login',
-    staffLink: false,
     body: `<h1>Staff login</h1>
 ${error ? `<div class="alert error" role="alert">${esc(error)}</div>` : ''}
 <form method="post" action="/admin/login" class="card">
@@ -315,7 +480,6 @@ ${signupOpen ? '<p class="center"><a href="/admin/signup">Create an admin or tea
 export function signupPage({ errors = [], values = {} } = {}) {
   return layout({
     title: 'Create a staff account',
-    staffLink: false,
     body: `<h1>Create a staff account</h1>
 <p class="muted">For administrators and teachers. You need the sign-up code from your organization.</p>
 ${errorList(errors)}
@@ -403,7 +567,7 @@ ${rows
   .map(
     (row) => `<tr class="${row.due_date < today ? 'row-overdue' : ''}">
   <td>${esc(row.item_name)}</td>
-  <td>${esc(row.student_name)}${row.phone ? `<div class="muted small">${esc(row.phone)}</div>` : ''}${row.purpose ? `<div class="muted small">${esc(row.purpose)}</div>` : ''}</td>
+  <td>${esc(row.student_name)}${row.student_account_id ? ' <span class="badge returned" title="Checked out from a student account">Account</span>' : ''}${row.phone ? `<div class="muted small">${esc(row.phone)}</div>` : ''}${row.purpose ? `<div class="muted small">${esc(row.purpose)}</div>` : ''}</td>
   <td>${esc(row.student_id)}</td>
   <td><a href="mailto:${esc(row.email)}">${esc(row.email)}</a></td>
   <td>${esc(formatDateTime(row.checked_out_at))}</td>
@@ -448,7 +612,7 @@ ${rows
   .map(
     (row) => `<tr class="${!row.returned_at && row.due_date < today ? 'row-overdue' : ''}">
   <td>${esc(row.item_name)}</td>
-  <td>${esc(row.student_name)}</td>
+  <td>${esc(row.student_name)}${row.student_account_id ? ' <span class="badge returned" title="Checked out from a student account">Account</span>' : ''}</td>
   <td>${esc(row.student_id)}</td>
   <td>${esc(row.email)}</td>
   <td>${esc(formatDateTime(row.checked_out_at))}</td>
@@ -705,5 +869,84 @@ export function deletePersonPage({ user, person, itemCount }) {
   </form>
   <p><a href="/admin/people">Cancel</a></p>
 </div>`,
+  });
+}
+
+// ---------- Students and demo requests (admins) ----------
+
+export function studentsPage({ user, students, q }) {
+  return layout({
+    title: 'Students',
+    user,
+    active: 'students',
+    wide: true,
+    body: `<div class="page-head"><div><h1>Students</h1><p class="page-sub">Student accounts. Deactivating blocks a login; check-out history is kept.</p></div></div>
+<form method="get" action="/admin/students" class="filters no-print">
+  <input type="search" name="q" value="${esc(q)}" placeholder="Search name, ID or email" aria-label="Search">
+  <button class="secondary">Search</button>
+  ${q ? '<a href="/admin/students">Clear</a>' : ''}
+</form>
+${
+  students.length
+    ? `<div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Student ID</th><th>Email</th><th>Joined</th><th>Out now</th><th>All check-outs</th><th>Status</th><th></th></tr></thead>
+<tbody>
+${students
+  .map(
+    (row) => `<tr class="${row.active ? '' : 'row-retired'}">
+  <td>${esc(row.name)}</td>
+  <td>${esc(row.student_id)}</td>
+  <td>${esc(row.email)}</td>
+  <td>${esc(formatDateTime(row.created_at))}</td>
+  <td>${row.open}</td>
+  <td>${row.total}</td>
+  <td>${row.active ? '<span class="badge ontime">Active</span>' : '<span class="badge returned">Deactivated</span>'}</td>
+  <td><form method="post" action="/admin/students/${row.id}/active">
+    <input type="hidden" name="active" value="${row.active ? '0' : '1'}">
+    <button class="secondary small">${row.active ? 'Deactivate' : 'Reactivate'}</button>
+  </form></td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+    : `<p class="card empty">${q ? 'No students match this search.' : 'No student accounts yet.'}</p>`
+}`,
+  });
+}
+
+export function demosPage({ user, requests }) {
+  return layout({
+    title: 'Demo requests',
+    user,
+    active: 'demos',
+    wide: true,
+    body: `<div class="page-head"><div><h1>Demo requests</h1><p class="page-sub">Schools that asked for a demo from the home page. Reply by email, then mark them contacted.</p></div></div>
+${
+  requests.length
+    ? `<div class="table-wrap"><table>
+<thead><tr><th>Received</th><th>School</th><th>Contact</th><th>Role</th><th>Message</th><th>Status</th><th></th></tr></thead>
+<tbody>
+${requests
+  .map(
+    (row) => `<tr>
+  <td>${esc(formatDateTime(row.created_at))}</td>
+  <td>${esc(row.school)}</td>
+  <td>${esc(row.name)}<div class="small"><a href="mailto:${esc(row.email)}">${esc(row.email)}</a></div></td>
+  <td>${esc(row.role)}</td>
+  <td>${esc(row.message)}</td>
+  <td>${row.status === 'new' ? '<span class="badge overdue-soft">New</span>' : '<span class="badge returned">Contacted</span>'}</td>
+  <td><div class="row-actions">
+    <form method="post" action="/admin/demos/${row.id}/status">
+      <input type="hidden" name="status" value="${row.status === 'new' ? 'contacted' : 'new'}">
+      <button class="secondary small">${row.status === 'new' ? 'Mark contacted' : 'Mark new'}</button>
+    </form>
+    <form method="post" action="/admin/demos/${row.id}/delete"><button class="link-button danger-link">Delete</button></form>
+  </div></td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+    : '<p class="card empty">No demo requests yet.</p>'
+}`,
   });
 }

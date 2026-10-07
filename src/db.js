@@ -24,6 +24,30 @@ CREATE TABLE IF NOT EXISTS users (
   created_at    TEXT NOT NULL
 );
 
+-- Student accounts. A student signs up once, then checks items out under that account.
+CREATE TABLE IF NOT EXISTS students (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  student_id    TEXT NOT NULL,
+  email         TEXT NOT NULL UNIQUE,
+  phone         TEXT NOT NULL DEFAULT '',
+  password_hash TEXT NOT NULL,
+  active        INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL
+);
+
+-- Schools that asked for a demo from the home page.
+CREATE TABLE IF NOT EXISTS demo_requests (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  email      TEXT NOT NULL,
+  school     TEXT NOT NULL,
+  role       TEXT NOT NULL DEFAULT '',
+  message    TEXT NOT NULL DEFAULT '',
+  status     TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'contacted')),
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS checkouts (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id        INTEGER NOT NULL REFERENCES items(id),
@@ -77,6 +101,11 @@ export async function openDb({ url, authToken }) {
   const itemColumns = (await db.prepare('PRAGMA table_info(items)').all()).map((column) => column.name);
   if (!itemColumns.includes('owner_id')) {
     await client.execute('ALTER TABLE items ADD COLUMN owner_id INTEGER REFERENCES users(id)');
+  }
+  // Check-outs made before student accounts existed have no account.
+  const checkoutColumns = (await db.prepare('PRAGMA table_info(checkouts)').all()).map((column) => column.name);
+  if (!checkoutColumns.includes('student_account_id')) {
+    await client.execute('ALTER TABLE checkouts ADD COLUMN student_account_id INTEGER REFERENCES students(id)');
   }
   return db;
 }

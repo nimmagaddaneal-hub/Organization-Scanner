@@ -30,8 +30,8 @@ function sign(payload, secret) {
 }
 
 // The session cookie holds "userId.expiry.signature". Only the server can make a valid signature.
-export function createSessionValue(userId, secret) {
-  const payload = `${userId}.${Date.now() + SESSION_HOURS * 60 * 60 * 1000}`;
+export function createSessionValue(userId, secret, hours = SESSION_HOURS) {
+  const payload = `${userId}.${Date.now() + hours * 60 * 60 * 1000}`;
   return `${payload}.${sign(payload, secret)}`;
 }
 

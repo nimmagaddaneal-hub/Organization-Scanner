@@ -19,7 +19,9 @@ import * as views from './views.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const RETURN_COOKIE_DAYS = 180;
+const STUDENT_COOKIE = 'student_session';
+const STUDENT_SESSION_HOURS = 24 * 30;
+const STUDENT_PHONE_PATTERN = /^[0-9+().\-\s]{7,30}$/;
 
 function todayLocal() {
   // en-CA formats as YYYY-MM-DD in the server's time zone (set TZ to change it).
@@ -63,7 +65,11 @@ export function createApp({
   if (trustProxy) app.set('trust proxy', 1);
 
   const loginLimiter = createRateLimiter(8, 15 * 60 * 1000);
-  const returnLimiter = createRateLimiter(5, 10 * 60 * 1000);
+  const demoLimiter = createRateLimiter(5, 60 * 60 * 1000);
+  // A whole school can share one network address, so student limits are per account, and the per-address limits are loose.
+  const studentEmailLimiter = createRateLimiter(8, 15 * 60 * 1000);
+  const studentIpLimiter = createRateLimiter(200, 15 * 60 * 1000);
+  const studentSignupLimiter = createRateLimiter(200, 60 * 60 * 1000);
   const signupLimiter = createRateLimiter(8, 15 * 60 * 1000);
   // Limits password guesses on the settings page, per account.
   const accountLimiter = createRateLimiter(8, 15 * 60 * 1000);
@@ -85,6 +91,22 @@ export function createApp({
   app.use(express.static(fileURLToPath(new URL('../public', import.meta.url))));
   app.use(express.urlencoded({ extended: false, limit: '20kb' }));
 
+  // Block form posts that come from another website.
+  app.use((req, res, next) => {
+    if (req.method !== 'POST') return next();
+    const origin = req.get('origin');
+    if (origin) {
+      let originHost = '';
+      try {
+        originHost = new URL(origin).host;
+      } catch {
+        // Leave empty so the check below fails.
+      }
+      if (originHost !== req.get('host')) return res.status(403).type('text').send('Forbidden');
+    }
+    next();
+  });
+
   const cookieOptions = (req, extra) => ({ httpOnly: true, secure: req.secure, ...extra });
 
   const findItem = db.prepare('SELECT * FROM items WHERE code = ? AND active = 1');
@@ -93,15 +115,171 @@ export function createApp({
     'UPDATE checkouts SET returned_at = ?, returned_by = ? WHERE id = ? AND returned_at IS NULL'
   );
 
+  // Return links made before student accounts existed used a cookie on the phone. They still work.
   const returnCookieName = (item) => `rt_${item.code}`;
   const holdsItem = (req, item, checkout) =>
     Boolean(checkout) &&
     Boolean(req.cookies[returnCookieName(item)]) &&
     safeEqual(req.cookies[returnCookieName(item)], checkout.return_token);
 
-  // ---------- Student routes ----------
+  // ---------- Student accounts ----------
 
-  app.get('/', (req, res) => res.send(views.homePage()));
+  // Student cookies are signed with their own secret, so an admin cookie is never accepted as a student one.
+  const studentSecret = `${sessionSecret}:student`;
+  const findStudent = db.prepare('SELECT id, name, student_id, email, phone FROM students WHERE id = ? AND active = 1');
+
+  app.use(async (req, res, next) => {
+    try {
+      const studentId = readSession(req.cookies[STUDENT_COOKIE], studentSecret);
+      req.student = studentId ? (await findStudent.get(studentId)) ?? null : null;
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  const startStudentSession = (req, res, studentId) =>
+    res.cookie(
+      STUDENT_COOKIE,
+      createSessionValue(studentId, studentSecret, STUDENT_SESSION_HOURS),
+      cookieOptions(req, { sameSite: 'lax', path: '/', maxAge: STUDENT_SESSION_HOURS * 60 * 60 * 1000 })
+    );
+
+  // Only our own item pages and the account page are valid places to go after logging in.
+  const safeNext = (value) => (/^\/i\/[a-z0-9]{1,40}$/.test(String(value)) || value === '/account' ? value : '/account');
+  const studentDummyHash = hashPassword(randomBytes(16).toString('hex'));
+
+  app.get('/student/login', async (req, res) => {
+    const next = safeNext(req.query.next);
+    if (req.student) return res.redirect(next);
+    res.send(views.studentLoginPage({ next }));
+  });
+
+  app.post('/student/login', async (req, res) => {
+    const next = safeNext(req.body?.next);
+    const email = text(req.body?.email, 254).toLowerCase();
+    if (studentEmailLimiter.isBlocked(email) || studentIpLimiter.isBlocked(req.ip)) {
+      return res.status(429).send(views.studentLoginPage({ next, email, error: 'Too many attempts. Try again in 15 minutes.' }));
+    }
+    const account = await db.prepare('SELECT * FROM students WHERE email = ?').get(email);
+    const passwordOk = verifyPassword(req.body?.password ?? '', account ? account.password_hash : studentDummyHash);
+    if (!account || !passwordOk || !account.active) {
+      studentEmailLimiter.recordFailure(email);
+      studentIpLimiter.recordFailure(req.ip);
+      return res.status(401).send(views.studentLoginPage({ next, email, error: 'Wrong email or password.' }));
+    }
+    studentEmailLimiter.clear(email);
+    startStudentSession(req, res, account.id);
+    res.redirect(303, next);
+  });
+
+  app.get('/student/signup', async (req, res) => {
+    const next = safeNext(req.query.next);
+    if (req.student) return res.redirect(next);
+    res.send(views.studentSignupPage({ next, emailDomain }));
+  });
+
+  app.post('/student/signup', async (req, res) => {
+    const next = safeNext(req.body?.next);
+    const values = {
+      name: text(req.body?.name, 100),
+      student_id: text(req.body?.student_id, 20),
+      email: text(req.body?.email, 254).toLowerCase(),
+      phone: text(req.body?.phone, 30),
+    };
+    const password = String(req.body?.password ?? '');
+    const fail = (status, errors) => res.status(status).send(views.studentSignupPage({ next, values, errors, emailDomain }));
+
+    if (studentSignupLimiter.isBlocked(req.ip)) return fail(429, ['Too many sign-ups from this network. Try again later.']);
+
+    const errors = [];
+    if (!values.name) errors.push('Enter your full name.');
+    if (!values.student_id) errors.push('Enter your student ID number (lunch number).');
+    else if (!/^[A-Za-z0-9-]+$/.test(values.student_id)) errors.push('Student ID can only contain letters, numbers and dashes.');
+    if (!values.email) errors.push('Enter your school email.');
+    else if (!EMAIL_PATTERN.test(values.email)) errors.push('Enter a valid email address.');
+    else if (emailDomain && !values.email.endsWith(`@${emailDomain}`)) errors.push(`Use your school email ending in @${emailDomain}.`);
+    if (values.phone && !STUDENT_PHONE_PATTERN.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
+    if (password.length < 8) errors.push('Choose a password of 8 characters or more.');
+    else if (password.length > 200) errors.push('Choose a password of 200 characters or fewer.');
+    else if (password !== String(req.body?.confirm_password ?? '')) errors.push('The passwords do not match.');
+    if (errors.length) return fail(400, errors);
+
+    let studentAccountId;
+    try {
+      const result = await db
+        .prepare('INSERT INTO students (name, student_id, email, phone, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(values.name, values.student_id, values.email, values.phone, hashPassword(password), new Date().toISOString());
+      studentAccountId = result.lastInsertRowid;
+    } catch (error) {
+      if (String(error.message).includes('UNIQUE')) return fail(400, ['An account with this email already exists. Log in instead.']);
+      throw error;
+    }
+    studentSignupLimiter.recordFailure(req.ip);
+    startStudentSession(req, res, studentAccountId);
+    res.redirect(303, next);
+  });
+
+  app.post('/student/logout', async (req, res) => {
+    res.clearCookie(STUDENT_COOKIE, cookieOptions(req, { sameSite: 'lax', path: '/' }));
+    res.redirect(303, '/');
+  });
+
+  app.get('/account', async (req, res) => {
+    if (!req.student) return res.redirect('/student/login?next=/account');
+    const rows = await db
+      .prepare(
+        `SELECT c.*, i.name AS item_name, i.code AS item_code
+           FROM checkouts c JOIN items i ON i.id = c.item_id
+          WHERE c.student_account_id = ?
+          ORDER BY c.checked_out_at DESC`
+      )
+      .all(req.student.id);
+    res.send(
+      views.accountPage({
+        student: req.student,
+        open: rows.filter((row) => !row.returned_at),
+        history: rows.filter((row) => row.returned_at),
+        today: todayLocal(),
+      })
+    );
+  });
+
+  // ---------- Demo requests from other schools ----------
+
+  const homePage = (req, extra = {}) => views.homePage({ student: req.student, ...extra });
+
+  app.get('/', async (req, res) => res.send(homePage(req, { demoSent: req.query.demo === 'sent' })));
+
+  app.post('/demo', async (req, res) => {
+    const values = {
+      name: text(req.body?.name, 100),
+      email: text(req.body?.email, 254).toLowerCase(),
+      school: text(req.body?.school, 150),
+      role: text(req.body?.role, 100),
+      message: text(req.body?.message, 1000),
+    };
+    // A hidden field that people never see. Bots fill it in. They get a fake success and nothing is saved.
+    if (text(req.body?.website, 200)) return res.redirect(303, '/?demo=sent#demo');
+
+    const key = `demo:${req.ip}`;
+    if (demoLimiter.isBlocked(key)) {
+      return res.status(429).send(homePage(req, { demo: { values, errors: ['Too many requests. Try again later.'] } }));
+    }
+    const errors = [];
+    if (!values.name) errors.push('Enter your name.');
+    if (!EMAIL_PATTERN.test(values.email)) errors.push('Enter a valid email address.');
+    if (!values.school) errors.push('Enter your school or organization.');
+    if (errors.length) return res.status(400).send(homePage(req, { demo: { values, errors } }));
+
+    demoLimiter.recordFailure(key);
+    await db
+      .prepare('INSERT INTO demo_requests (name, email, school, role, message, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(values.name, values.email, values.school, values.role, values.message, new Date().toISOString());
+    res.redirect(303, '/?demo=sent#demo');
+  });
+
+  // ---------- Items: scan, check out, return ----------
 
   // For handheld barcode scanners and typed codes: the barcode holds the item code.
   app.get('/find', async (req, res) => {
@@ -126,6 +304,7 @@ export function createApp({
           title: 'Item not found',
           message: 'This code does not match an item. Ask an organization officer for help.',
           status: 'warning',
+          student: req.student,
         })
       );
     }
@@ -133,149 +312,93 @@ export function createApp({
     next();
   });
 
+  const isHolder = (req, item, checkout) =>
+    holdsItem(req, item, checkout) || (Boolean(req.student) && checkout.student_account_id === req.student.id);
+
   const formPage = (req, extra = {}) =>
     views.checkoutFormPage({
       item: req.item,
+      student: req.student,
       today: todayLocal(),
       now: new Date().toISOString(),
-      emailDomain,
       ...extra,
     });
 
   app.get('/i/:code', async (req, res) => {
-    const checkout = await findOpenCheckout.get(req.item.id);
-    if (!checkout) return res.send(formPage(req));
-    if (holdsItem(req, req.item, checkout)) {
-      return res.send(
-        views.ownCheckoutPage({ item: req.item, checkout, justCheckedOut: req.query.done === '1' })
-      );
+    const { item, student } = req;
+    const checkout = await findOpenCheckout.get(item.id);
+    if (!checkout) {
+      if (!student) return res.send(views.loginRequiredPage({ item }));
+      return res.send(formPage(req));
     }
-    res.send(views.unavailablePage({ item: req.item }));
+    if (isHolder(req, item, checkout)) {
+      return res.send(views.ownCheckoutPage({ item, student, checkout, justCheckedOut: req.query.done === '1' }));
+    }
+    res.send(views.unavailablePage({ item, student }));
   });
 
   app.post('/i/:code/checkout', async (req, res) => {
-    const item = req.item;
+    const { item, student } = req;
+    if (!student) return res.redirect(303, `/student/login?next=/i/${item.code}`);
+
     const values = {
-      student_name: text(req.body?.student_name, 100),
-      student_id: text(req.body?.student_id, 20),
-      email: text(req.body?.email, 254).toLowerCase(),
       phone: text(req.body?.phone, 30),
       due_date: text(req.body?.due_date, 10),
       purpose: text(req.body?.purpose, 500),
     };
-
     const errors = [];
-    if (!values.student_name) errors.push('Enter your full name.');
-    if (!values.student_id) errors.push('Enter your student ID number (lunch number).');
-    else if (!/^[A-Za-z0-9-]+$/.test(values.student_id)) {
-      errors.push('Student ID can only contain letters, numbers and dashes.');
-    }
-    if (!values.email) errors.push('Enter your school email.');
-    else if (!EMAIL_PATTERN.test(values.email)) errors.push('Enter a valid email address.');
-    else if (emailDomain && !values.email.endsWith(`@${emailDomain}`)) {
-      errors.push(`Use your school email ending in @${emailDomain}.`);
-    }
-    if (values.phone && !/^[0-9+().\-\s]{7,30}$/.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
+    if (values.phone && !STUDENT_PHONE_PATTERN.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
     if (!values.due_date) errors.push('Choose an expected return date.');
     else if (!isRealDate(values.due_date)) errors.push('Enter a valid return date.');
     else if (values.due_date < todayLocal()) errors.push('The return date cannot be in the past.');
-
     if (errors.length) return res.status(400).send(formPage(req, { values, errors }));
 
-    const returnToken = randomBytes(24).toString('hex');
     try {
-      await db.prepare(
-        `INSERT INTO checkouts
-           (item_id, student_name, student_id, email, phone, purpose, checked_out_at, due_date, return_token)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        item.id,
-        values.student_name,
-        values.student_id,
-        values.email,
-        values.phone,
-        values.purpose,
-        new Date().toISOString(),
-        values.due_date,
-        returnToken
-      );
+      // Name, ID and email are copied from the account, so the record still reads correctly if the account changes later.
+      await db
+        .prepare(
+          `INSERT INTO checkouts
+             (item_id, student_name, student_id, email, phone, purpose, checked_out_at, due_date, return_token, student_account_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          item.id,
+          student.name,
+          student.student_id,
+          student.email,
+          values.phone,
+          values.purpose,
+          new Date().toISOString(),
+          values.due_date,
+          randomBytes(24).toString('hex'),
+          student.id
+        );
     } catch (error) {
       // The unique index rejects a second open check-out for the same item.
       if (String(error.message).includes('UNIQUE')) {
-        return res.status(409).send(views.unavailablePage({ item }));
+        return res.status(409).send(views.unavailablePage({ item, student }));
       }
       throw error;
     }
-
-    // Remember on this phone that this student holds the item, so a later scan offers "Return".
-    res.cookie(
-      returnCookieName(item),
-      returnToken,
-      cookieOptions(req, {
-        sameSite: 'lax',
-        path: `/i/${item.code}`,
-        maxAge: RETURN_COOKIE_DAYS * 24 * 60 * 60 * 1000,
-      })
-    );
     res.redirect(303, `/i/${item.code}?done=1`);
   });
 
   app.post('/i/:code/return', async (req, res) => {
-    const item = req.item;
+    const { item, student } = req;
     const checkout = await findOpenCheckout.get(item.id);
     if (!checkout) return res.redirect(303, `/i/${item.code}`);
-
-    const limiterKey = `${req.ip}:${item.id}`;
-    let allowed = holdsItem(req, item, checkout);
-
-    if (!allowed) {
-      if (returnLimiter.isBlocked(limiterKey)) {
-        return res.status(429).send(
-          views.unavailablePage({ item, errors: ['Too many attempts. Wait a few minutes or ask an officer for help.'] })
-        );
-      }
-      const studentId = text(req.body?.student_id, 20);
-      const email = text(req.body?.email, 254).toLowerCase();
-      // Check both fields every time, and give one generic message, so the form reveals nothing.
-      const idMatches = safeEqual(studentId.toLowerCase(), checkout.student_id.toLowerCase());
-      const emailMatches = safeEqual(email, checkout.email);
-      allowed = Boolean(studentId) && Boolean(email) && idMatches && emailMatches;
-      if (!allowed) {
-        returnLimiter.recordFailure(limiterKey);
-        return res.status(403).send(
-          views.unavailablePage({
-            item,
-            errors: ['Those details do not match this check-out. Check them, or ask an officer for help.'],
-          })
-        );
-      }
+    if (!isHolder(req, item, checkout)) {
+      if (!student) return res.redirect(303, `/student/login?next=/i/${item.code}`);
+      return res.status(403).send(views.unavailablePage({ item, student }));
     }
-
     await markReturned.run(new Date().toISOString(), 'student', checkout.id);
-    returnLimiter.clear(limiterKey);
     res.clearCookie(returnCookieName(item), cookieOptions(req, { sameSite: 'lax', path: `/i/${item.code}` }));
-    res.send(views.returnedPage({ item }));
+    res.send(views.returnedPage({ item, student }));
   });
 
   // ---------- Staff routes (admins and teachers) ----------
 
   const admin = express.Router();
-
-  // Block form posts that come from another website.
-  admin.use(async (req, res, next) => {
-    if (req.method !== 'POST') return next();
-    const origin = req.get('origin');
-    if (origin) {
-      let originHost = '';
-      try {
-        originHost = new URL(origin).host;
-      } catch {
-        // Leave empty so the check below fails.
-      }
-      if (originHost !== req.get('host')) return res.status(403).type('text').send('Forbidden');
-    }
-    next();
-  });
 
   const findUser = db.prepare('SELECT id, name, email, role, active FROM users WHERE id = ? AND active = 1');
   // The account is looked up on every request, so deactivating someone takes effect at once.
@@ -645,6 +768,43 @@ export function createApp({
     res.send(
       views.qrSheetPage({ user: req.user, labels, baseUrl: root, single, justListed: req.query.listed === '1' && labels.length > 0 })
     );
+  });
+
+  admin.get('/students', requireAdmin, async (req, res) => {
+    const q = text(req.query.q, 100);
+    const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+    const students = await db
+      .prepare(
+        `SELECT s.*,
+                (SELECT COUNT(*) FROM checkouts c WHERE c.student_account_id = s.id) AS total,
+                (SELECT COUNT(*) FROM checkouts c WHERE c.student_account_id = s.id AND c.returned_at IS NULL) AS open
+           FROM students s
+          ${q ? "WHERE s.name LIKE ? ESCAPE '\\' OR s.email LIKE ? ESCAPE '\\' OR s.student_id LIKE ? ESCAPE '\\'" : ''}
+          ORDER BY s.name COLLATE NOCASE`
+      )
+      .all(...(q ? [like, like, like] : []));
+    res.send(views.studentsPage({ user: req.user, students, q }));
+  });
+
+  admin.post('/students/:id/active', requireAdmin, async (req, res) => {
+    await db.prepare('UPDATE students SET active = ? WHERE id = ?').run(req.body?.active === '1' ? 1 : 0, Number(req.params.id));
+    res.redirect(303, '/admin/students');
+  });
+
+  admin.get('/demos', requireAdmin, async (req, res) => {
+    const requests = await db.prepare('SELECT * FROM demo_requests ORDER BY status = \'contacted\', created_at DESC').all();
+    res.send(views.demosPage({ user: req.user, requests }));
+  });
+
+  admin.post('/demos/:id/status', requireAdmin, async (req, res) => {
+    const status = req.body?.status === 'contacted' ? 'contacted' : 'new';
+    await db.prepare('UPDATE demo_requests SET status = ? WHERE id = ?').run(status, Number(req.params.id));
+    res.redirect(303, '/admin/demos');
+  });
+
+  admin.post('/demos/:id/delete', requireAdmin, async (req, res) => {
+    await db.prepare('DELETE FROM demo_requests WHERE id = ?').run(Number(req.params.id));
+    res.redirect(303, '/admin/demos');
   });
 
   admin.get('/people', requireAdmin, async (req, res) => {

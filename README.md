@@ -2,7 +2,7 @@
 
 A scan-to-check-out system for a school organization.
 
-- **Students** scan the QR code on an item with their phone camera, fill out a short form, and the item is logged as checked out. No app and no login.
+- **Students** create an account once (name, ID or lunch number, school email, password). Then they scan the QR code on an item with their phone camera, pick a return date, and the item is logged under their account. No app to install.
 - **Teachers** sign up for an account, list their own items, and get a printable QR code and barcode for each one right away. They see check-outs of their own items only.
 - **Administrators** sign up for an account and see everything: all check-outs, all items, history, CSV export, code labels, and the list of staff accounts.
 
@@ -105,12 +105,32 @@ To change an item, click **Edit**. Unchecking **Active** retires the item: its c
 
 To remove an item for good, click **Delete** and confirm. This also deletes the item's check-out records and cannot be undone, so export the CSV from **History** first if you need them. An item that is checked out cannot be deleted until it is marked returned. Prefer retiring when you want to keep the history. Teachers can edit only items they listed. The sample items belong to the organization, so only admins see them.
 
+## Student accounts
+
+- Students sign up at `/student/signup` (the home page has a button). No code is needed: students only ever see their own items.
+- At check-out the form is filled in from the account (name, ID, email). The student adds a return date and optional phone and notes.
+- Scanning an item while logged out asks the student to log in or sign up, then returns them to that item.
+- **My items** (`/account`) lists what a student has out, with a Return button, plus their history.
+- Staff see the account on each check-out (an **Account** tag). Admins also get a **Students** page: search accounts, see how many items each has out, and deactivate an account (it is logged out at once; history is kept).
+- A student returns an item by being logged in as the person who checked it out. From another phone: log in there, then scan.
+- Check-outs made before this feature have no account. Admins can mark those returned on the dashboard.
+- Student logins last 30 days. After 8 wrong passwords for one account, that account is blocked for 15 minutes. Other students are not affected, so a whole school sharing one network is fine.
+- There is no student "forgot password" email yet. An admin deactivates the account, and the student signs up again with a different email.
+- If `SCHOOL_EMAIL_DOMAIN` is set, only emails ending in that domain can sign up. **Set it**, so only your school's addresses get accounts.
+
+## Demo requests from other schools
+
+The home page has a **Request a demo** button (top) and a form (bottom). Each request is saved. Admins read them on the **Demos** page, reply by email, and mark them contacted. Nothing is emailed automatically, so **check the Demos page**. A hidden field and a limit of 5 requests per hour per address keep bots out.
+
+Staff sign-up needs a code, so a new school only gets staff access after you give it a code.
+
 ## How it works for students
 
-1. Scan the code. The form opens with the item and the current date and time already filled in.
-2. Enter full name, student ID, school email, expected return date (required), and phone and purpose (optional).
-3. A confirmation screen appears.
-4. To return the item, scan the same code again and tap **Return this item**.
+1. Create a student account once, or log in.
+2. Scan the code. The form opens with the item, the current date and time, and your details filled in.
+3. Pick an expected return date (required). Phone and purpose are optional.
+4. A confirmation screen appears.
+5. To return the item, scan the same code again (or open **My items**) and tap **Return this item**.
 
 If someone else scans an item that is checked out, they see **Unavailable** and nothing about who has it.
 
@@ -164,7 +184,8 @@ Hosted on Turso: the Turso dashboard has backups and a data browser. Local or Fl
 
 - Student data is shown only on staff pages. Every staff page and action requires a login. Teachers see student data only for check-outs of their own items; admins see all of it.
 - Nobody can make a staff account without a sign-up code.
-- The student pages never show who has an item. Returning an item needs either the phone that checked it out or the matching student ID **and** email; wrong guesses are limited to 5 per 10 minutes.
+- The student pages never show who has an item. Only the student who checked an item out (logged in) can return it, or an admin or the item's teacher.
+- Student and staff logins are separate: a student login never opens staff pages.
 - No credentials are in the code. All settings come from environment variables.
 - The database refuses a second open check-out for the same item, even if two students submit at the same moment.
 - Use HTTPS when deployed (Fly.io and Render do this for you) and set `TRUST_PROXY=1` so cookies are marked secure.
@@ -199,15 +220,16 @@ Run these by hand after setup or after any change:
 - [ ] `/admin/signup` with a wrong code is refused. With the admin code it creates an admin account and logs in.
 - [ ] Sign up a second account with the teacher code. It lands on **Items** and sees no sample items and no **People** link.
 - [ ] As the teacher, list an item. The label opens with a QR code and a barcode. **Print** opens the print dialog.
-- [ ] Scan the QR code (or click **Open form**). The item name and check-out time are filled in and read-only.
+- [ ] Logged out, scan a code: it asks you to log in. Create a student account: you land back on the item.
+- [ ] Logged in, scan a code. The item name and check-out time are read-only, and your details show under "Checking out as".
 - [ ] On the home page, type the code printed under the barcode. The same form opens.
-- [ ] Submit the form empty. Errors appear and nothing is saved.
+- [ ] Submit the form with no return date. An error appears and nothing is saved.
 - [ ] Submit the form with valid details. The confirmation screen appears.
 - [ ] The check-out appears on the teacher's dashboard with item, name, student ID, email, dates and **On time**. The admin sees it too.
 - [ ] A check-out of a sample item appears for the admin and not for the teacher.
 - [ ] Open the same item link in a private window (a "different student"). It shows **Unavailable** and no student details. A duplicate check-out is not possible.
-- [ ] In the private window, try to return with a wrong student ID and email. It is refused.
-- [ ] Scan again on the original phone. **Return this item** is offered and works. The item is available again.
+- [ ] In the private window, log in as a second student and try to return it. It is refused.
+- [ ] Scan again as the first student. **Return this item** is offered and works, and **My items** shows it. The item is available again.
 - [ ] Check out an item, then click **Mark returned** on the dashboard. It leaves the dashboard and appears in **History** as returned.
 - [ ] Check out an item with today as the return date, wait until tomorrow (or edit the date in the database). The row is highlighted **Overdue**.
 - [ ] Search by student name and by item name. Filter by **Overdue**.
@@ -216,4 +238,6 @@ Run these by hand after setup or after any change:
 - [ ] Open **Settings** (click your name): change the name, change the password (wrong current password is refused), log in with the new password.
 - [ ] Delete your own teacher account in Settings: you are logged out, your items remain as organization items. The only admin is refused.
 - [ ] As admin, open **People**, **Delete** a teacher account after the confirmation page.
+- [ ] As admin, open **Students**: the account shows with its check-out counts. Deactivate it: the student is logged out.
+- [ ] On the home page, send a demo request. It appears on the admin **Demos** page. Mark it contacted.
 - [ ] As admin, open **People** and deactivate the teacher. The teacher is logged out and cannot log in.
