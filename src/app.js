@@ -66,7 +66,7 @@ export function createApp({
   const returnLimiter = createRateLimiter(5, 10 * 60 * 1000);
   const signupLimiter = createRateLimiter(8, 15 * 60 * 1000);
 
-  app.use((req, res, next) => {
+  app.use(async (req, res, next) => {
     res.set({
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'DENY',
@@ -102,7 +102,7 @@ export function createApp({
   app.get('/', (req, res) => res.send(views.homePage()));
 
   // For handheld barcode scanners and typed codes: the barcode holds the item code.
-  app.get('/find', (req, res) => {
+  app.get('/find', async (req, res) => {
     const code = text(req.query.code, 40).toLowerCase();
     if (!/^[a-z0-9]+$/.test(code)) return res.redirect('/');
     res.redirect(`/i/${code}`);
@@ -111,8 +111,13 @@ export function createApp({
   app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
   // Load the scanned item for every /i/:code route.
-  app.param('code', (req, res, next, code) => {
-    const item = findItem.get(String(code));
+  app.param('code', async (req, res, next, code) => {
+    let item;
+    try {
+      item = await findItem.get(String(code));
+    } catch (error) {
+      return next(error);
+    }
     if (!item) {
       return res.status(404).send(
         views.messagePage({
@@ -135,8 +140,8 @@ export function createApp({
       ...extra,
     });
 
-  app.get('/i/:code', (req, res) => {
-    const checkout = findOpenCheckout.get(req.item.id);
+  app.get('/i/:code', async (req, res) => {
+    const checkout = await findOpenCheckout.get(req.item.id);
     if (!checkout) return res.send(formPage(req));
     if (holdsItem(req, req.item, checkout)) {
       return res.send(
@@ -146,7 +151,7 @@ export function createApp({
     res.send(views.unavailablePage({ item: req.item }));
   });
 
-  app.post('/i/:code/checkout', (req, res) => {
+  app.post('/i/:code/checkout', async (req, res) => {
     const item = req.item;
     const values = {
       student_name: text(req.body?.student_name, 100),
@@ -177,7 +182,7 @@ export function createApp({
 
     const returnToken = randomBytes(24).toString('hex');
     try {
-      db.prepare(
+      await db.prepare(
         `INSERT INTO checkouts
            (item_id, student_name, student_id, email, phone, purpose, checked_out_at, due_date, return_token)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -213,9 +218,9 @@ export function createApp({
     res.redirect(303, `/i/${item.code}?done=1`);
   });
 
-  app.post('/i/:code/return', (req, res) => {
+  app.post('/i/:code/return', async (req, res) => {
     const item = req.item;
-    const checkout = findOpenCheckout.get(item.id);
+    const checkout = await findOpenCheckout.get(item.id);
     if (!checkout) return res.redirect(303, `/i/${item.code}`);
 
     const limiterKey = `${req.ip}:${item.id}`;
@@ -244,7 +249,7 @@ export function createApp({
       }
     }
 
-    markReturned.run(new Date().toISOString(), 'student', checkout.id);
+    await markReturned.run(new Date().toISOString(), 'student', checkout.id);
     returnLimiter.clear(limiterKey);
     res.clearCookie(returnCookieName(item), cookieOptions(req, { sameSite: 'lax', path: `/i/${item.code}` }));
     res.send(views.returnedPage({ item }));
@@ -255,7 +260,7 @@ export function createApp({
   const admin = express.Router();
 
   // Block form posts that come from another website.
-  admin.use((req, res, next) => {
+  admin.use(async (req, res, next) => {
     if (req.method !== 'POST') return next();
     const origin = req.get('origin');
     if (origin) {
@@ -272,9 +277,9 @@ export function createApp({
 
   const findUser = db.prepare('SELECT id, name, email, role, active FROM users WHERE id = ? AND active = 1');
   // The account is looked up on every request, so deactivating someone takes effect at once.
-  const currentUser = (req) => {
+  const currentUser = async (req) => {
     const userId = readSession(req.cookies[ADMIN_COOKIE], sessionSecret);
-    return userId ? findUser.get(userId) ?? null : null;
+    return userId ? (await findUser.get(userId)) ?? null : null;
   };
   const startSession = (req, res, userId) =>
     res.cookie(
@@ -286,17 +291,17 @@ export function createApp({
   // Checked when the email is unknown, so a wrong email takes as long as a wrong password.
   const dummyHash = hashPassword(randomBytes(16).toString('hex'));
 
-  admin.get('/login', (req, res) => {
-    if (currentUser(req)) return res.redirect('/admin');
+  admin.get('/login', async (req, res) => {
+    if (await currentUser(req)) return res.redirect('/admin');
     res.send(views.loginPage({ signupOpen }));
   });
 
-  admin.post('/login', (req, res) => {
+  admin.post('/login', async (req, res) => {
     const email = text(req.body?.email, 254).toLowerCase();
     if (loginLimiter.isBlocked(req.ip)) {
       return res.status(429).send(views.loginPage({ email, signupOpen, error: 'Too many attempts. Try again in 15 minutes.' }));
     }
-    const account = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    const account = await db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     const passwordOk = verifyPassword(req.body?.password ?? '', account ? account.password_hash : dummyHash);
     if (!account || !passwordOk || !account.active) {
       loginLimiter.recordFailure(req.ip);
@@ -307,12 +312,12 @@ export function createApp({
     res.redirect(303, '/admin');
   });
 
-  admin.get('/signup', (req, res) => {
+  admin.get('/signup', async (req, res) => {
     if (!signupOpen) return res.status(404).send(views.messagePage({ title: 'Sign-up is closed', message: 'Ask an administrator for help.', status: 'warning' }));
     res.send(views.signupPage());
   });
 
-  admin.post('/signup', (req, res) => {
+  admin.post('/signup', async (req, res) => {
     if (!signupOpen) return res.status(404).type('text').send('Sign-up is closed.');
     const values = { name: text(req.body?.name, 100), email: text(req.body?.email, 254).toLowerCase() };
     const password = String(req.body?.password ?? '');
@@ -339,11 +344,10 @@ export function createApp({
 
     let userId;
     try {
-      userId = Number(
-        db
-          .prepare('INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)')
-          .run(values.name, values.email, hashPassword(password), role, new Date().toISOString()).lastInsertRowid
-      );
+      const result = await db
+        .prepare('INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(values.name, values.email, hashPassword(password), role, new Date().toISOString());
+      userId = result.lastInsertRowid;
     } catch (error) {
       if (String(error.message).includes('UNIQUE')) return fail(400, ['An account with this email already exists. Log in instead.']);
       throw error;
@@ -353,19 +357,19 @@ export function createApp({
   });
 
   // Everything registered on this router below this line requires a staff login.
-  admin.use((req, res, next) => {
-    req.user = currentUser(req);
+  admin.use(async (req, res, next) => {
+    req.user = await currentUser(req);
     if (req.user) return next();
     if (req.method === 'GET') return res.redirect('/admin/login');
     res.status(401).type('text').send('Log in first.');
   });
 
-  const requireAdmin = (req, res, next) => {
+  const requireAdmin = async (req, res, next) => {
     if (req.user.role === 'admin') return next();
     res.status(403).send(views.messagePage({ title: 'Admins only', message: 'Your account cannot open this page.', status: 'warning' }));
   };
 
-  admin.post('/logout', (req, res) => {
+  admin.post('/logout', async (req, res) => {
     res.clearCookie(ADMIN_COOKIE, cookieOptions(req, { sameSite: 'strict', path: '/admin' }));
     res.redirect(303, '/admin/login');
   });
@@ -414,39 +418,39 @@ export function createApp({
 
   const filters = (req) => ({ q: text(req.query.q, 100), status: text(req.query.status, 20) });
 
-  admin.get('/', (req, res) => {
+  admin.get('/', async (req, res) => {
     const { q, status } = filters(req);
     const today = todayLocal();
-    const open = findCheckouts(req.user, { openOnly: true });
+    const open = await findCheckouts(req.user, { openOnly: true });
     const counts = { out: open.length, overdue: open.filter((row) => row.due_date < today).length };
     res.send(
-      views.dashboardPage({ user: req.user, rows: findCheckouts(req.user, { q, status, openOnly: true }), q, status, today, counts })
+      views.dashboardPage({ user: req.user, rows: await findCheckouts(req.user, { q, status, openOnly: true }), q, status, today, counts })
     );
   });
 
-  admin.get('/history', (req, res) => {
+  admin.get('/history', async (req, res) => {
     const { q, status } = filters(req);
     res.send(
-      views.historyPage({ user: req.user, rows: findCheckouts(req.user, { q, status, openOnly: false }), q, status, today: todayLocal() })
+      views.historyPage({ user: req.user, rows: await findCheckouts(req.user, { q, status, openOnly: false }), q, status, today: todayLocal() })
     );
   });
 
-  admin.post('/checkouts/:id/return', (req, res) => {
+  admin.post('/checkouts/:id/return', async (req, res) => {
     const where = ['c.id = ?'];
     const params = [Number(req.params.id)];
     ownerScope(req.user, where, params);
-    const checkout = db
+    const checkout = await db
       .prepare(`SELECT c.id FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
       .get(...params);
     if (!checkout) return res.status(404).type('text').send('Check-out not found');
-    markReturned.run(new Date().toISOString(), req.user.role, checkout.id);
+    await markReturned.run(new Date().toISOString(), req.user.role, checkout.id);
     res.redirect(303, '/admin');
   });
 
-  admin.get('/export.csv', (req, res) => {
+  admin.get('/export.csv', async (req, res) => {
     const openOnly = req.query.scope !== 'all';
     const today = todayLocal();
-    const rows = findCheckouts(req.user, { openOnly });
+    const rows = await findCheckouts(req.user, { openOnly });
     const header = [
       'Item', 'Student name', 'Student ID', 'Email', 'Phone', 'Purpose',
       'Checked out', 'Due date', 'Returned', 'Returned by', 'Status',
@@ -488,28 +492,28 @@ export function createApp({
 
   const itemValues = (req) => ({ name: text(req.body?.name, 100), description: text(req.body?.description, 200) });
 
-  admin.get('/items', (req, res) => res.send(views.itemsPage({ user: req.user, items: findItems(req.user) })));
+  admin.get('/items', async (req, res) => res.send(views.itemsPage({ user: req.user, items: await findItems(req.user) })));
 
   // Listing an item makes its code at once and goes straight to the printable label.
-  admin.post('/items', (req, res) => {
+  admin.post('/items', async (req, res) => {
     const values = itemValues(req);
     if (!values.name) {
       return res
         .status(400)
-        .send(views.itemsPage({ user: req.user, items: findItems(req.user), values, errors: ['Enter an item name.'] }));
+        .send(views.itemsPage({ user: req.user, items: await findItems(req.user), values, errors: ['Enter an item name.'] }));
     }
-    const itemId = createItem(db, { ...values, ownerId: req.user.id });
+    const itemId = await createItem(db, { ...values, ownerId: req.user.id });
     res.redirect(303, `/admin/qr?item=${itemId}&listed=1`);
   });
 
-  admin.get('/items/:id/edit', (req, res) => {
-    const [item] = findItems(req.user, { id: Number(req.params.id) });
+  admin.get('/items/:id/edit', async (req, res) => {
+    const [item] = await findItems(req.user, { id: Number(req.params.id) });
     if (!item) return res.status(404).type('text').send('Item not found');
     res.send(views.editItemPage({ user: req.user, item }));
   });
 
-  admin.post('/items/:id', (req, res) => {
-    const [item] = findItems(req.user, { id: Number(req.params.id) });
+  admin.post('/items/:id', async (req, res) => {
+    const [item] = await findItems(req.user, { id: Number(req.params.id) });
     if (!item) return res.status(404).type('text').send('Item not found');
     const values = { ...itemValues(req), active: req.body?.active === '1' ? 1 : 0 };
     if (!values.name) {
@@ -517,7 +521,7 @@ export function createApp({
         .status(400)
         .send(views.editItemPage({ user: req.user, item: { ...item, ...values }, errors: ['Enter an item name.'] }));
     }
-    db.prepare('UPDATE items SET name = ?, description = ?, active = ? WHERE id = ?').run(
+    await db.prepare('UPDATE items SET name = ?, description = ?, active = ? WHERE id = ?').run(
       values.name,
       values.description,
       values.active,
@@ -528,7 +532,7 @@ export function createApp({
 
   admin.get('/qr', async (req, res) => {
     const single = req.query.item !== undefined;
-    const items = findItems(req.user, { id: single ? Number(req.query.item) : undefined, activeOnly: true });
+    const items = await findItems(req.user, { id: single ? Number(req.query.item) : undefined, activeOnly: true });
     const root = (baseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
     const labels = await Promise.all(
       items.map(async (item) => ({
@@ -543,24 +547,24 @@ export function createApp({
     );
   });
 
-  admin.get('/people', requireAdmin, (req, res) => {
-    const people = db.prepare('SELECT id, name, email, role, active, created_at FROM users ORDER BY role, name COLLATE NOCASE').all();
+  admin.get('/people', requireAdmin, async (req, res) => {
+    const people = await db.prepare('SELECT id, name, email, role, active, created_at FROM users ORDER BY role, name COLLATE NOCASE').all();
     res.send(
       views.peoplePage({ user: req.user, people, signup: { admin: Boolean(adminSignupCode), teacher: Boolean(teacherSignupCode) } })
     );
   });
 
-  admin.post('/people/:id/active', requireAdmin, (req, res) => {
+  admin.post('/people/:id/active', requireAdmin, async (req, res) => {
     const personId = Number(req.params.id);
     // Admins cannot deactivate themselves, so there is always one working admin.
     if (personId === req.user.id) return res.status(400).type('text').send('You cannot deactivate your own account.');
-    db.prepare('UPDATE users SET active = ? WHERE id = ?').run(req.body?.active === '1' ? 1 : 0, personId);
+    await db.prepare('UPDATE users SET active = ? WHERE id = ?').run(req.body?.active === '1' ? 1 : 0, personId);
     res.redirect(303, '/admin/people');
   });
 
   app.use('/admin', admin);
 
-  app.use((req, res) => {
+  app.use(async (req, res) => {
     res.status(404).send(views.messagePage({ title: 'Page not found', message: 'This page does not exist.', status: 'warning' }));
   });
 

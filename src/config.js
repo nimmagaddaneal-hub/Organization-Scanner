@@ -8,4 +8,7 @@ if (existsSync('.env')) process.loadEnvFile('.env');
 // An empty TZ= line would switch the clock to UTC. Empty means "use this computer's time zone".
 if (!process.env.TZ) delete process.env.TZ;
 
-export const databasePath = process.env.DATABASE_PATH || './data/checkout.db';
+// A hosted Turso database when TURSO_DATABASE_URL is set, otherwise a local SQLite file.
+export const database = process.env.TURSO_DATABASE_URL
+  ? { url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN }
+  : { url: `file:${process.env.DATABASE_PATH || './data/checkout.db'}` };

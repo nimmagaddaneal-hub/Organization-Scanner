@@ -1,5 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openDb, createItem } from '../src/db.js';
 import { createApp } from '../src/app.js';
 
@@ -9,6 +12,7 @@ const ADMIN = { name: 'Test Admin', email: 'admin@example.edu', password: 'test-
 let server;
 let base;
 let db;
+let dbFolder;
 let camera;
 let tripod;
 
@@ -53,10 +57,11 @@ async function login({ email, password }) {
 const adminLogin = () => login(ADMIN);
 
 before(async () => {
-  db = openDb(':memory:');
-  createItem(db, { name: 'Test Camera' });
-  createItem(db, { name: 'Test Tripod' });
-  [camera, tripod] = db.prepare('SELECT * FROM items ORDER BY id').all();
+  dbFolder = mkdtempSync(join(tmpdir(), 'checkout-test-'));
+  db = await openDb({ url: `file:${join(dbFolder, 'test.db')}` });
+  await createItem(db, { name: 'Test Camera' });
+  await createItem(db, { name: 'Test Tripod' });
+  [camera, tripod] = (await db.prepare('SELECT * FROM items ORDER BY id').all());
   const app = createApp({ db, sessionSecret: 'test-secret', adminSignupCode: ADMIN_CODE, teacherSignupCode: TEACHER_CODE });
   await new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', resolve);
@@ -65,7 +70,11 @@ before(async () => {
   assert.equal((await signUp(ADMIN, ADMIN_CODE)).status, 303);
 });
 
-after(() => server.close());
+after(() => {
+  server.close();
+  db.close();
+  rmSync(dbFolder, { recursive: true, force: true });
+});
 
 test('scanned link opens the form with the item filled in', async () => {
   const response = await request(`/i/${camera.code}`);
@@ -90,7 +99,7 @@ test('form rejects missing and invalid fields', async () => {
   assert.match(html, /Enter your full name/);
   assert.match(html, /valid email/);
   assert.match(html, /cannot be in the past/);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM checkouts').get().n, 0);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts').get()).n, 0);
 });
 
 test('every admin route requires the login', async () => {
@@ -142,7 +151,7 @@ test('full flow: check out, dashboard, duplicate blocked, return', async () => {
     form: student({ student_name: 'Other Person', student_id: '999', email: 'other@example.edu' }),
   });
   assert.equal(duplicate.status, 409);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE returned_at IS NULL').get().n, 1);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE returned_at IS NULL').get()).n, 1);
 
   // A different student cannot return it with wrong details.
   const wrongReturn = await request(`/i/${camera.code}/return`, {
@@ -186,7 +195,7 @@ test('admin: mark returned, overdue highlight, search, filter, CSV, items, QR', 
   await request(`/i/${camera.code}/checkout`, { method: 'POST', form: student({ student_name: 'Late Larry', student_id: '555' }) });
   await request(`/i/${tripod.code}/checkout`, { method: 'POST', form: student({ student_name: 'Punctual Pat', student_id: '666' }) });
   // Make the camera check-out overdue.
-  db.prepare("UPDATE checkouts SET due_date = '2020-01-01' WHERE student_id = '555'").run();
+  (await db.prepare("UPDATE checkouts SET due_date = '2020-01-01' WHERE student_id = '555'").run());
 
   const dashboard = await (await request('/admin', { cookie: adminCookie })).text();
   assert.match(dashboard, /row-overdue/);
@@ -208,11 +217,11 @@ test('admin: mark returned, overdue highlight, search, filter, CSV, items, QR', 
   assert.match(csv, /"Returned"/);
 
   // Mark the overdue one as returned.
-  const overdueId = db.prepare("SELECT id FROM checkouts WHERE student_id = '555' AND returned_at IS NULL").get().id;
+  const overdueId = (await db.prepare("SELECT id FROM checkouts WHERE student_id = '555' AND returned_at IS NULL").get()).id;
   const mark = await request(`/admin/checkouts/${overdueId}/return`, { method: 'POST', cookie: adminCookie });
   assert.equal(mark.status, 303);
   assert.doesNotMatch(await (await request('/admin', { cookie: adminCookie })).text(), /Late Larry/);
-  assert.equal(db.prepare('SELECT returned_by FROM checkouts WHERE id = ?').get(overdueId).returned_by, 'admin');
+  assert.equal((await db.prepare('SELECT returned_by FROM checkouts WHERE id = ?').get(overdueId)).returned_by, 'admin');
 
   // Add and edit an item.
   const added = await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'New Banner', description: '' } });
@@ -221,14 +230,14 @@ test('admin: mark returned, overdue highlight, search, filter, CSV, items, QR', 
   const label = await (await request(added.headers.get('location'), { cookie: adminCookie })).text();
   assert.match(label, /Item listed/);
   assert.equal(label.match(/<svg/g).length, 2);
-  const banner = db.prepare("SELECT * FROM items WHERE name = 'New Banner'").get();
+  const banner = (await db.prepare("SELECT * FROM items WHERE name = 'New Banner'").get());
   assert.ok(banner.code);
   await request(`/admin/items/${banner.id}`, {
     method: 'POST',
     cookie: adminCookie,
     form: { name: 'Club Banner', description: 'Vinyl', active: '1' },
   });
-  assert.equal(db.prepare('SELECT name FROM items WHERE id = ?').get(banner.id).name, 'Club Banner');
+  assert.equal((await db.prepare('SELECT name FROM items WHERE id = ?').get(banner.id)).name, 'Club Banner');
 
   // QR sheet has one code per active item.
   const qr = await (await request('/admin/qr', { cookie: adminCookie })).text();
@@ -268,20 +277,20 @@ test('sign-up needs a valid code, and the code decides the role', async () => {
   const refused = await signUp(nobody, 'wrong-code');
   assert.equal(refused.status, 400);
   assert.equal(refused.headers.getSetCookie().length, 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users WHERE email = ?').get(nobody.email).n, 0);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE email = ?').get(nobody.email)).n, 0);
 
   const weak = await signUp({ ...nobody, password: 'short' }, TEACHER_CODE);
   assert.equal(weak.status, 400);
 
   const teacher = { name: 'Role Teacher', email: 'role.teacher@example.edu', password: 'long-enough-password' };
   assert.equal((await signUp(teacher, TEACHER_CODE)).status, 303);
-  const stored = db.prepare('SELECT * FROM users WHERE email = ?').get(teacher.email);
+  const stored = (await db.prepare('SELECT * FROM users WHERE email = ?').get(teacher.email));
   assert.equal(stored.role, 'teacher');
   assert.doesNotMatch(stored.password_hash, /long-enough-password/);
 
   // The same email cannot sign up twice.
   assert.equal((await signUp(teacher, ADMIN_CODE)).status, 400);
-  assert.equal(db.prepare('SELECT role FROM users WHERE email = ?').get(teacher.email).role, 'teacher');
+  assert.equal((await db.prepare('SELECT role FROM users WHERE email = ?').get(teacher.email)).role, 'teacher');
 });
 
 test('teacher lists an item, gets a code, and sees only their own items and check-outs', async () => {
@@ -292,7 +301,7 @@ test('teacher lists an item, gets a code, and sees only their own items and chec
   const added = await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Lab Microscope' } });
   const label = await (await request(added.headers.get('location'), { cookie: teacherCookie })).text();
   assert.match(label, /Lab Microscope/);
-  const microscope = db.prepare("SELECT * FROM items WHERE name = 'Lab Microscope'").get();
+  const microscope = (await db.prepare("SELECT * FROM items WHERE name = 'Lab Microscope'").get());
   assert.equal(label.match(/<svg/g).length, 2);
 
   // The barcode value opens the item form.
@@ -310,7 +319,7 @@ test('teacher lists an item, gets a code, and sees only their own items and chec
   assert.match(await (await request('/admin', { cookie: teacherCookie })).text(), /Micro Mia/);
 
   // The teacher cannot touch other people's items or check-outs, or the People page.
-  const cameraCheckout = db.prepare("SELECT id FROM checkouts WHERE student_id = '888' AND returned_at IS NULL").get();
+  const cameraCheckout = (await db.prepare("SELECT id FROM checkouts WHERE student_id = '888' AND returned_at IS NULL").get());
   assert.equal((await request(`/admin/checkouts/${cameraCheckout.id}/return`, { method: 'POST', cookie: teacherCookie })).status, 404);
   assert.equal((await request(`/admin/items/${camera.id}/edit`, { cookie: teacherCookie })).status, 404);
   assert.equal((await request(`/admin/items/${camera.id}`, { method: 'POST', cookie: teacherCookie, form: { name: 'Hacked' } })).status, 404);
@@ -319,14 +328,14 @@ test('teacher lists an item, gets a code, and sees only their own items and chec
   assert.equal((await request('/admin/people', { cookie: teacherCookie })).status, 403);
 
   // The teacher can mark their own item returned.
-  const ownCheckout = db.prepare("SELECT id FROM checkouts WHERE student_id = '777' AND returned_at IS NULL").get();
+  const ownCheckout = (await db.prepare("SELECT id FROM checkouts WHERE student_id = '777' AND returned_at IS NULL").get());
   assert.equal((await request(`/admin/checkouts/${ownCheckout.id}/return`, { method: 'POST', cookie: teacherCookie })).status, 303);
 
   // The admin sees both, and can deactivate the teacher, which ends the teacher's session at once.
   const adminCookie = await adminLogin();
   assert.match(await (await request('/admin', { cookie: adminCookie })).text(), /Camera Cam/);
   assert.match(await (await request('/admin/items', { cookie: adminCookie })).text(), /Ms Rivera/);
-  const teacherId = db.prepare('SELECT id FROM users WHERE email = ?').get(teacher.email).id;
+  const teacherId = (await db.prepare('SELECT id FROM users WHERE email = ?').get(teacher.email)).id;
   await request(`/admin/people/${teacherId}/active`, { method: 'POST', cookie: adminCookie, form: { active: '0' } });
   assert.equal((await request('/admin', { cookie: teacherCookie })).status, 302);
   assert.equal((await request('/admin/login', { method: 'POST', form: { email: teacher.email, password: teacher.password } })).status, 401);

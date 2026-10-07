@@ -8,9 +8,9 @@ A scan-to-check-out system for a school organization.
 
 ## What it is built with
 
-- [Node.js](https://nodejs.org) 22.13 or newer (uses the SQLite support built into Node, so there is no database to install)
+- [Node.js](https://nodejs.org) 20.12 or newer
 - [Express](https://expressjs.com) for the web server
-- SQLite for storage: one file, `data/checkout.db`
+- SQLite for storage. Locally: one file, `data/checkout.db`. Hosted: a free [Turso](https://turso.tech) database, which is SQLite in the cloud. Same code for both, through [@libsql/client](https://www.npmjs.com/package/@libsql/client)
 - [qrcode](https://www.npmjs.com/package/qrcode) and [bwip-js](https://www.npmjs.com/package/bwip-js) to draw the QR codes and barcodes
 
 ```
@@ -26,7 +26,7 @@ test/           automated tests
 
 ## Setup
 
-1. Install [Node.js](https://nodejs.org) 22.13 or newer.
+1. Install [Node.js](https://nodejs.org) 20.12 or newer.
 2. In this folder, install the dependencies:
    ```bash
    npm install
@@ -112,32 +112,49 @@ If someone else scans an item that is checked out, they see **Unavailable** and 
 
 ## Deploy
 
-The system needs a host that keeps one file (the database) on a disk that survives restarts. Many "free" hosts wipe the disk on every restart, which would erase your check-outs, so they are not suitable.
+### Recommended: Render + Turso (free)
 
-### Recommended: Fly.io (about $2 to $4 per month)
+- **Render** runs the site. Free plan.
+- **Turso** stores the data. Free plan. Needed because Render's free plan erases local files on every restart.
 
-This repo includes a `Dockerfile` and `fly.toml` for it. Fly.io requires a credit card. There is no reliable free tier for new accounts.
+Limits of the free setup:
 
-1. Install the `fly` command and sign up: <https://fly.io/docs/flyctl/install/>
-2. In this folder:
-   ```bash
-   fly launch --no-deploy        # pick an app name; keep the existing fly.toml settings
-   fly volumes create checkout_data --size 1
-   fly secrets set ADMIN_SIGNUP_CODE="admin-code" TEACHER_SIGNUP_CODE="teacher-code" SESSION_SECRET="long-random-string" BASE_URL="https://YOUR-APP-NAME.fly.dev"
-   fly deploy
-   ```
-3. Open `https://YOUR-APP-NAME.fly.dev/admin/signup`, create your admin account, list items, and print the codes.
+- The site **sleeps after 15 minutes without visitors**. The next scan takes about 30 to 60 seconds to load. After that it is fast.
+- Free plans can change. Check the current limits on [render.com/pricing](https://render.com/pricing) and [turso.tech/pricing](https://turso.tech/pricing).
 
-Optional secrets: `SCHOOL_EMAIL_DOMAIN` and `TZ` (example: `America/Chicago`). Set `TZ` on a host, or due dates use UTC.
+Steps:
 
-### Alternatives
+1. **Merge `scanning-system` into `main`** on GitHub (pull request, then merge). Render deploys from `main`.
+2. **Create the database.** Sign up at <https://turso.tech>. Create a database (any name, pick the region closest to you). Copy two values:
+   - the database URL (starts with `libsql://`);
+   - an auth token (**Create Token**, read and write, no expiry).
+3. **Create the site.** Sign up at <https://render.com> with your GitHub account. Click **New > Blueprint**, pick this repository. Render reads `render.yaml` and asks for:
+   - `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`: the two values from step 2.
+   - `ADMIN_SIGNUP_CODE` and `TEACHER_SIGNUP_CODE`: two different secret codes you make up, 8 characters or more.
+   - `TZ`: your time zone, for example `America/Chicago`. Without it, due dates use UTC.
+4. Click **Apply** and wait for the deploy to finish. Render shows the public address, like `https://organization-scanner.onrender.com`.
+5. Open `THAT-ADDRESS/admin/signup` and create your admin account with the admin code.
+6. List items and print the codes. The QR codes use the public address automatically.
 
-- **Render** (about $7 per month): create a Web Service from this repo, add a persistent disk mounted at `/data`, and set the same variables plus `DATABASE_PATH=/data/checkout.db` and `TRUST_PROXY=1`. The free plan has no persistent disk, so do not use it.
-- **A computer at school that stays on** (free): run `npm start` on it and set `BASE_URL` to its address on the school network. Works only while students are on that network.
+To change a setting later: Render dashboard > the service > **Environment**. Saving restarts the site.
+
+Tables are created automatically on first start. To add the 5 sample items to the hosted database, put the two `TURSO_` values in your local `.env` and run `npm run seed` (then remove them again to go back to the local file).
+
+### Alternatives (paid, never sleep)
+
+- **Fly.io** (about $2 to $4 per month): this repo includes a `Dockerfile` and `fly.toml`. Install `fly` (<https://fly.io/docs/flyctl/install/>), then:
+  ```bash
+  fly launch --no-deploy
+  fly volumes create checkout_data --size 1
+  fly secrets set ADMIN_SIGNUP_CODE="admin-code" TEACHER_SIGNUP_CODE="teacher-code" SESSION_SECRET="long-random-string" BASE_URL="https://YOUR-APP-NAME.fly.dev" TZ="America/Chicago"
+  fly deploy
+  ```
+  Data stays in a SQLite file on the Fly volume. No Turso needed.
+- **Render paid plan** (about $7 per month): same steps as above; change `plan: free` to `plan: starter` in `render.yaml`. The site no longer sleeps.
 
 ### Backups
 
-All data is in the file at `DATABASE_PATH`. Copy that file to back it up. Also use **Export CSV** on the History page from time to time.
+Hosted on Turso: the Turso dashboard has backups and a data browser. Local or Fly.io: all data is in the file at `DATABASE_PATH`; copy that file. In both cases, use **Export CSV** on the History page from time to time.
 
 ## Privacy and security
 

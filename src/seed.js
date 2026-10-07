@@ -1,5 +1,5 @@
 // Adds a few fake items so the system can be tried right away: npm run seed
-import { databasePath } from './config.js';
+import { database } from './config.js';
 import { openDb, createItem } from './db.js';
 
 const SAMPLE_ITEMS = [
@@ -10,16 +10,16 @@ const SAMPLE_ITEMS = [
   { name: 'Projector', description: 'HDMI projector with remote and power cable' },
 ];
 
-const db = openDb(databasePath);
-const { count } = db.prepare('SELECT COUNT(*) AS count FROM items').get();
+const db = await openDb(database);
+const { count } = await db.prepare('SELECT COUNT(*) AS count FROM items').get();
 
 if (count > 0) {
   console.log(`The inventory already has ${count} item(s). Nothing added.`);
 } else {
-  for (const item of SAMPLE_ITEMS) createItem(db, item);
+  for (const item of SAMPLE_ITEMS) await createItem(db, item);
   console.log(`Added ${SAMPLE_ITEMS.length} sample items.`);
 }
 
-for (const item of db.prepare('SELECT name, code FROM items WHERE active = 1 ORDER BY name').all()) {
+for (const item of await db.prepare('SELECT name, code FROM items WHERE active = 1 ORDER BY name').all()) {
   console.log(`  ${item.name}: /i/${item.code}`);
 }

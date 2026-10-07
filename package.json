@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=22.13"
+    "node": ">=20.12"
   },
   "scripts": {
     "start": "node src/server.js",
@@ -14,6 +14,7 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "bwip-js": "^4.11.4",
     "express": "^5.2.1",
     "qrcode": "^1.5.4"

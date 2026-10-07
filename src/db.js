@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createClient } from '@libsql/client';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -47,15 +47,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_open_checkout_per_item
 CREATE INDEX IF NOT EXISTS checkouts_by_item ON checkouts(item_id);
 `;
 
-export function openDb(path) {
-  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  db.exec(SCHEMA);
+// url is either a local file ("file:./data/checkout.db") or a hosted Turso database ("libsql://...").
+// Both speak SQLite, so the rest of the code does not care which one it is.
+export async function openDb({ url, authToken }) {
+  if (url.startsWith('file:')) mkdirSync(dirname(url.slice('file:'.length)), { recursive: true });
+  const client = createClient({ url, authToken: authToken || undefined });
+
+  const rowsOf = (result) =>
+    result.rows.map((row) => Object.fromEntries(result.columns.map((column, index) => [column, row[index]])));
+
+  const db = {
+    // Same shape as a prepared statement, but every call returns a promise.
+    prepare(sql) {
+      return {
+        all: async (...args) => rowsOf(await client.execute({ sql, args })),
+        get: async (...args) => rowsOf(await client.execute({ sql, args }))[0],
+        run: async (...args) => {
+          const result = await client.execute({ sql, args });
+          return { changes: result.rowsAffected, lastInsertRowid: Number(result.lastInsertRowid ?? 0) };
+        },
+      };
+    },
+    close: () => client.close(),
+  };
+
+  if (url.startsWith('file:')) await client.execute('PRAGMA journal_mode = WAL');
+  await client.executeMultiple(SCHEMA);
   // Databases made before staff accounts existed have no owner column on items.
-  const itemColumns = db.prepare('PRAGMA table_info(items)').all().map((column) => column.name);
+  const itemColumns = (await db.prepare('PRAGMA table_info(items)').all()).map((column) => column.name);
   if (!itemColumns.includes('owner_id')) {
-    db.exec('ALTER TABLE items ADD COLUMN owner_id INTEGER REFERENCES users(id)');
+    await client.execute('ALTER TABLE items ADD COLUMN owner_id INTEGER REFERENCES users(id)');
   }
   return db;
 }
@@ -66,8 +87,8 @@ export function newItemCode() {
 }
 
 // ownerId is the staff member who listed the item. null means it belongs to the organization.
-export function createItem(db, { name, description = '', ownerId = null }) {
-  const result = db
+export async function createItem(db, { name, description = '', ownerId = null }) {
+  const result = await db
     .prepare('INSERT INTO items (code, name, description, owner_id, created_at) VALUES (?, ?, ?, ?, ?)')
     .run(newItemCode(), name, description, ownerId, new Date().toISOString());
   return Number(result.lastInsertRowid);
