@@ -164,7 +164,7 @@ export function createApp({
 
     const errors = [];
     if (!values.student_name) errors.push('Enter your full name.');
-    if (!values.student_id) errors.push('Enter your student ID number.');
+    if (!values.student_id) errors.push('Enter your student ID number (lunch number).');
     else if (!/^[A-Za-z0-9-]+$/.test(values.student_id)) {
       errors.push('Student ID can only contain letters, numbers and dashes.');
     }

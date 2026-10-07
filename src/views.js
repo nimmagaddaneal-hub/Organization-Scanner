@@ -94,7 +94,7 @@ ${errorList(errors)}
   <label>Full name <span class="required">*</span>
     <input type="text" name="student_name" value="${esc(values.student_name)}" autocomplete="name" maxlength="100" required>
   </label>
-  <label>Student ID number <span class="required">*</span>
+  <label>Student ID number (lunch number) <span class="required">*</span>
     <input type="text" name="student_id" value="${esc(values.student_id)}" inputmode="numeric" autocomplete="off" maxlength="20" required>
   </label>
   <label>School email <span class="required">*</span>
@@ -147,10 +147,10 @@ export function unavailablePage({ item, errors = [] }) {
 </div>
 <details class="card" ${errors.length ? 'open' : ''}>
   <summary>I checked this out. Return this item</summary>
-  <p class="muted small">Enter the same student ID and email you used at check-out.</p>
+  <p class="muted small">Enter the same student ID (lunch number) and email you used at check-out.</p>
   ${errorList(errors)}
   <form method="post" action="/i/${esc(item.code)}/return" novalidate>
-    <label>Student ID number
+    <label>Student ID number (lunch number)
       <input type="text" name="student_id" inputmode="numeric" autocomplete="off" maxlength="20" required>
     </label>
     <label>School email
