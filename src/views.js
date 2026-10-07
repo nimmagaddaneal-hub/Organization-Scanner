@@ -395,7 +395,7 @@ ${items
         ? '<span class="badge overdue-soft">Checked out</span>'
         : '<span class="badge ontime">Available</span>'
   }</td>
-  <td class="actions"><a href="/admin/items/${item.id}/edit">Edit</a> <a href="/admin/qr?item=${item.id}">Code label</a> <a href="/i/${esc(item.code)}">Open form</a></td>
+  <td class="actions"><a href="/admin/items/${item.id}/edit">Edit</a> <a href="/admin/qr?item=${item.id}">Code label</a> <a href="/i/${esc(item.code)}">Open form</a> <a class="danger-link" href="/admin/items/${item.id}/delete">Delete</a></td>
 </tr>`
   )
   .join('')}
@@ -420,6 +420,29 @@ ${errorList(errors)}
   <button class="primary">Save</button>
   <a href="/admin/items">Cancel</a>
 </form>`,
+  });
+}
+
+export function deleteItemPage({ user, item, historyCount }) {
+  const records = `${historyCount} check-out record${historyCount === 1 ? '' : 's'}`;
+  return layout({
+    title: `Delete ${item.name}`,
+    user,
+    body: `<h1>Delete item</h1>
+<div class="card">
+  <p><strong>${esc(item.name)}</strong>${item.description ? `<br><span class="muted">${esc(item.description)}</span>` : ''}</p>
+  ${
+    item.is_out
+      ? `<div class="alert warning" role="alert"><strong>This item is checked out.</strong> Mark it returned on the dashboard before deleting it.</div>
+  <a class="button secondary" href="/admin">Go to dashboard</a>`
+      : `<div class="alert error" role="alert"><strong>This cannot be undone.</strong> The item, its QR code and barcode, and its ${records} are deleted for good.</div>
+  <p class="muted small">To keep the history, cancel and retire the item instead: <a href="/admin/items/${item.id}/edit">Edit</a>, then uncheck Active. To keep a copy of the records, export the CSV from History first.</p>
+  <form method="post" action="/admin/items/${item.id}/delete">
+    <button class="danger">Delete item for good</button>
+  </form>`
+  }
+  <p><a href="/admin/items">Cancel</a></p>
+</div>`,
   });
 }
 

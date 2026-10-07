@@ -165,3 +165,6 @@ td form { margin: 0; }
 
 .barcode { margin-top: 8px; }
 .barcode svg { width: 100%; max-width: 200px; height: auto; }
+
+button.danger { background: var(--error-text); color: #fff; width: 100%; }
+a.danger-link { color: var(--error-text); }

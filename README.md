@@ -99,7 +99,9 @@ Phone cameras open QR codes but do not open links from ordinary barcodes. To use
 
 Important: the QR codes contain `BASE_URL`. **Set `BASE_URL` to the final address before you print.** If the address changes later, print the codes again. (Barcodes do not contain the address and stay valid.)
 
-To change an item, click **Edit**. Unchecking **Active** retires the item: its codes stop working and its history is kept. Items are never deleted, so history stays complete. Teachers can edit only items they listed. The sample items belong to the organization, so only admins see them.
+To change an item, click **Edit**. Unchecking **Active** retires the item: its codes stop working and its history is kept.
+
+To remove an item for good, click **Delete** and confirm. This also deletes the item's check-out records and cannot be undone, so export the CSV from **History** first if you need them. An item that is checked out cannot be deleted until it is marked returned. Prefer retiring when you want to keep the history. Teachers can edit only items they listed. The sample items belong to the organization, so only admins see them.
 
 ## How it works for students
 
@@ -172,7 +174,7 @@ Hosted on Turso: the Turso dashboard has backups and a data browser. Local or Fl
 - **Sign-up is protected by codes.** An open sign-up page would let anyone become an admin and read student data, so each role needs its code.
 - **Teachers are a separate, limited role.** They see only their own items and those items' check-outs.
 - **"Barcode" means both:** every label has a QR code (for phones) and a Code 128 barcode (for handheld scanners).
-- **Items are retired, not deleted**, so history is never lost.
+- **Items can be retired or deleted.** Retiring keeps the history. Deleting removes the item and its check-out records, after a confirmation page.
 - **Overdue** means the expected return date is before today. An item due today is on time.
 - **Email domain is not enforced** unless you set `SCHOOL_EMAIL_DOMAIN`.
 - **Student ID** accepts letters, numbers and dashes, up to 20 characters.
@@ -208,4 +210,5 @@ Run these by hand after setup or after any change:
 - [ ] Check out an item with today as the return date, wait until tomorrow (or edit the date in the database). The row is highlighted **Overdue**.
 - [ ] Search by student name and by item name. Filter by **Overdue**.
 - [ ] **Export CSV** downloads a file that opens in a spreadsheet.
+- [ ] Delete an item: the confirmation page appears; a checked-out item is refused; after deleting, the item and its link are gone.
 - [ ] As admin, open **People** and deactivate the teacher. The teacher is logged out and cannot log in.

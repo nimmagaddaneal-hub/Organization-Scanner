@@ -530,6 +530,30 @@ export function createApp({
     res.redirect(303, '/admin/items');
   });
 
+  // Deleting is permanent, so it goes through a confirmation page first.
+  const historyCount = async (itemId) =>
+    (await db.prepare('SELECT COUNT(*) AS count FROM checkouts WHERE item_id = ?').get(itemId)).count;
+
+  admin.get('/items/:id/delete', async (req, res) => {
+    const [item] = await findItems(req.user, { id: Number(req.params.id) });
+    if (!item) return res.status(404).type('text').send('Item not found');
+    res.send(views.deleteItemPage({ user: req.user, item, historyCount: await historyCount(item.id) }));
+  });
+
+  admin.post('/items/:id/delete', async (req, res) => {
+    const [item] = await findItems(req.user, { id: Number(req.params.id) });
+    if (!item) return res.status(404).type('text').send('Item not found');
+    // An item a student still holds cannot be deleted. Mark it returned first.
+    if (item.is_out) {
+      return res
+        .status(409)
+        .send(views.deleteItemPage({ user: req.user, item, historyCount: await historyCount(item.id) }));
+    }
+    await db.prepare('DELETE FROM checkouts WHERE item_id = ?').run(item.id);
+    await db.prepare('DELETE FROM items WHERE id = ?').run(item.id);
+    res.redirect(303, '/admin/items');
+  });
+
   admin.get('/qr', async (req, res) => {
     const single = req.query.item !== undefined;
     const items = await findItems(req.user, { id: single ? Number(req.query.item) : undefined, activeOnly: true });

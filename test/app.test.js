@@ -103,12 +103,12 @@ test('form rejects missing and invalid fields', async () => {
 });
 
 test('every admin route requires the login', async () => {
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/people']) {
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/admin/login', path);
   }
-  for (const path of ['/admin/items', '/admin/items/1', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active']) {
+  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active']) {
     const response = await request(path, { method: 'POST', form: { name: 'x' } });
     assert.equal(response.status, 401, path);
   }
@@ -339,4 +339,38 @@ test('teacher lists an item, gets a code, and sees only their own items and chec
   await request(`/admin/people/${teacherId}/active`, { method: 'POST', cookie: adminCookie, form: { active: '0' } });
   assert.equal((await request('/admin', { cookie: teacherCookie })).status, 302);
   assert.equal((await request('/admin/login', { method: 'POST', form: { email: teacher.email, password: teacher.password } })).status, 401);
+});
+
+test('deleting an item: confirmation, blocked while checked out, owner only', async () => {
+  const adminCookie = await adminLogin();
+  await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'Doomed Easel' } });
+  const easel = (await db.prepare("SELECT * FROM items WHERE name = 'Doomed Easel'").get());
+
+  // A teacher cannot delete an item they did not list.
+  const teacher = { name: 'Mr Okafor', email: 'okafor@example.edu', password: 'long-enough-password' };
+  const teacherCookie = cookiesFrom(await signUp(teacher, TEACHER_CODE));
+  assert.equal((await request(`/admin/items/${easel.id}/delete`, { cookie: teacherCookie })).status, 404);
+  assert.equal((await request(`/admin/items/${easel.id}/delete`, { method: 'POST', cookie: teacherCookie })).status, 404);
+
+  // Opening the confirmation page deletes nothing.
+  const confirm = await (await request(`/admin/items/${easel.id}/delete`, { cookie: adminCookie })).text();
+  assert.match(confirm, /cannot be undone/);
+  assert.ok((await db.prepare('SELECT id FROM items WHERE id = ?').get(easel.id)));
+
+  // While a student holds it, deleting is refused.
+  await request(`/i/${easel.code}/checkout`, { method: 'POST', form: student({ student_name: 'Easel Eve', student_id: '4242' }) });
+  const blocked = await request(`/admin/items/${easel.id}/delete`, { method: 'POST', cookie: adminCookie });
+  assert.equal(blocked.status, 409);
+  assert.ok((await db.prepare('SELECT id FROM items WHERE id = ?').get(easel.id)));
+
+  // After the return, deleting removes the item, its link and its records. Other records stay.
+  const checkout = (await db.prepare('SELECT id FROM checkouts WHERE item_id = ?').get(easel.id));
+  await request(`/admin/checkouts/${checkout.id}/return`, { method: 'POST', cookie: adminCookie });
+  const others = (await db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE item_id != ?').get(easel.id)).n;
+  const deleted = await request(`/admin/items/${easel.id}/delete`, { method: 'POST', cookie: adminCookie });
+  assert.equal(deleted.status, 303);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM items WHERE id = ?').get(easel.id)).n, 0);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE item_id = ?').get(easel.id)).n, 0);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts').get()).n, others);
+  assert.equal((await request(`/i/${easel.code}`)).status, 404);
 });
