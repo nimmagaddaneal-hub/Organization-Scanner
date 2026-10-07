@@ -1,0 +1,20 @@
+{
+  "name": "checkout-request-for-organization",
+  "version": "1.0.0",
+  "description": "Scan-to-check-out system for a school organization",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node src/seed.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "qrcode": "^1.5.4"
+  }
+}
