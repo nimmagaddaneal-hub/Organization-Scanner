@@ -20,14 +20,15 @@ export function formatDate(day) {
   return new Date(year, month - 1, date).toLocaleDateString('en-US', { dateStyle: 'medium' });
 }
 
-function layout({ title, body, admin = false, wide = false }) {
-  const nav = admin
+function layout({ title, body, user = null, wide = false }) {
+  const nav = user
     ? `<nav class="admin-nav no-print">
         <a href="/admin">Checked out</a>
         <a href="/admin/history">History</a>
         <a href="/admin/items">Items</a>
-        <a href="/admin/qr">QR codes</a>
-        <form method="post" action="/admin/logout"><button class="link-button">Log out</button></form>
+        <a href="/admin/qr">Codes</a>
+        ${user.role === 'admin' ? '<a href="/admin/people">People</a>' : ''}
+        <form method="post" action="/admin/logout"><span class="muted small">${esc(user.name)} (${esc(user.role)})</span> <button class="link-button">Log out</button></form>
       </nav>`
     : '';
   return `<!doctype html>
@@ -60,7 +61,13 @@ export function homePage() {
     title: 'Item check-out',
     body: `<h1>Item check-out</h1>
 <p>Scan the QR code on an item to check it out or return it.</p>
-<p class="muted small"><a href="/admin">Administrator login</a></p>`,
+<form method="get" action="/find" class="card">
+  <label>Or type or scan the code printed under the barcode
+    <input type="text" name="code" autocomplete="off" autocapitalize="none" maxlength="40" required>
+  </label>
+  <button class="primary">Find item</button>
+</form>
+<p class="muted small"><a href="/admin">Staff login</a></p>`,
   });
 }
 
@@ -167,17 +174,81 @@ export function returnedPage({ item }) {
 
 // ---------- Admin pages ----------
 
-export function loginPage({ error } = {}) {
+export function loginPage({ error, email = '', signupOpen = true } = {}) {
   return layout({
-    title: 'Administrator login',
-    body: `<h1>Administrator login</h1>
+    title: 'Staff login',
+    body: `<h1>Staff login</h1>
 ${error ? `<div class="alert error" role="alert">${esc(error)}</div>` : ''}
 <form method="post" action="/admin/login" class="card">
+  <label>Email
+    <input type="email" name="email" value="${esc(email)}" autocomplete="username" maxlength="254" required autofocus>
+  </label>
   <label>Password
-    <input type="password" name="password" autocomplete="current-password" required autofocus>
+    <input type="password" name="password" autocomplete="current-password" required>
   </label>
   <button class="primary">Log in</button>
-</form>`,
+</form>
+${signupOpen ? '<p class="center"><a href="/admin/signup">Create an admin or teacher account</a></p>' : ''}`,
+  });
+}
+
+export function signupPage({ errors = [], values = {} } = {}) {
+  return layout({
+    title: 'Create a staff account',
+    body: `<h1>Create a staff account</h1>
+<p class="muted">For administrators and teachers. You need the sign-up code from your organization.</p>
+${errorList(errors)}
+<form method="post" action="/admin/signup" class="card" novalidate>
+  <label>Full name
+    <input type="text" name="name" value="${esc(values.name)}" autocomplete="name" maxlength="100" required>
+  </label>
+  <label>Email
+    <input type="email" name="email" value="${esc(values.email)}" autocomplete="username" maxlength="254" required>
+  </label>
+  <label>Password <span class="muted">(10 characters or more)</span>
+    <input type="password" name="password" autocomplete="new-password" minlength="10" maxlength="200" required>
+  </label>
+  <label>Sign-up code
+    <input type="password" name="signup_code" autocomplete="off" maxlength="200" required>
+  </label>
+  <p class="muted small">The admin code creates an administrator account. The teacher code creates a teacher account.</p>
+  <button class="primary">Create account</button>
+</form>
+<p class="center"><a href="/admin/login">Back to login</a></p>`,
+  });
+}
+
+export function peoplePage({ user, people, signup }) {
+  return layout({
+    title: 'People',
+    user,
+    wide: true,
+    body: `<h1>People</h1>
+<p class="muted">Staff accounts. Admin sign-up is <strong>${signup.admin ? 'open' : 'closed'}</strong>, teacher sign-up is <strong>${signup.teacher ? 'open' : 'closed'}</strong>.
+New staff sign up at <code>/admin/signup</code> with the code you give them.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th>Status</th><th></th></tr></thead>
+<tbody>
+${people
+  .map(
+    (person) => `<tr class="${person.active ? '' : 'row-retired'}">
+  <td>${esc(person.name)}</td>
+  <td>${esc(person.email)}</td>
+  <td>${esc(person.role)}</td>
+  <td>${esc(formatDateTime(person.created_at))}</td>
+  <td>${person.active ? '<span class="badge ontime">Active</span>' : '<span class="badge returned">Deactivated</span>'}</td>
+  <td>${
+    person.id === user.id
+      ? '<span class="muted small">You</span>'
+      : `<form method="post" action="/admin/people/${person.id}/active">
+          <input type="hidden" name="active" value="${person.active ? '0' : '1'}">
+          <button class="secondary small">${person.active ? 'Deactivate' : 'Reactivate'}</button>
+        </form>`
+  }</td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`,
   });
 }
 
@@ -200,7 +271,7 @@ function filterForm({ action, q, status, statuses }) {
 </form>`;
 }
 
-export function dashboardPage({ rows, q, status, today, counts }) {
+export function dashboardPage({ user, rows, q, status, today, counts }) {
   const body = rows.length
     ? `<div class="table-wrap"><table>
 <thead><tr><th>Item</th><th>Student</th><th>Student ID</th><th>Email</th><th>Checked out</th><th>Due</th><th>Status</th><th class="no-print"></th></tr></thead>
@@ -224,7 +295,7 @@ ${rows
 
   return layout({
     title: 'Checked-out items',
-    admin: true,
+    user,
     wide: true,
     body: `<div class="page-head">
   <h1>Checked-out items</h1>
@@ -241,7 +312,7 @@ ${body}`,
   });
 }
 
-export function historyPage({ rows, q, status, today }) {
+export function historyPage({ user, rows, q, status, today }) {
   const body = rows.length
     ? `<div class="table-wrap"><table>
 <thead><tr><th>Item</th><th>Student</th><th>Student ID</th><th>Email</th><th>Checked out</th><th>Due</th><th>Returned</th><th>Status</th></tr></thead>
@@ -265,7 +336,7 @@ ${rows
 
   return layout({
     title: 'Check-out history',
-    admin: true,
+    user,
     wide: true,
     body: `<div class="page-head">
   <h1>Check-out history</h1>
@@ -290,31 +361,33 @@ function itemFields(values = {}) {
   </label>`;
 }
 
-export function itemsPage({ items, errors = [], values = {} }) {
+export function itemsPage({ user, items, errors = [], values = {} }) {
   return layout({
     title: 'Items',
-    admin: true,
+    user,
     wide: true,
     body: `<div class="page-head">
   <h1>Items</h1>
-  <a class="button secondary" href="/admin/qr">Print all QR codes</a>
+  <a class="button secondary" href="/admin/qr">Print all codes</a>
 </div>
 <form method="post" action="/admin/items" class="card inline-form">
-  <h2>Add an item</h2>
+  <h2>List an item</h2>
+  <p class="muted small">A QR code and barcode are made for the item as soon as you add it.</p>
   ${errorList(errors)}
   ${itemFields(values)}
-  <button class="primary">Add item</button>
+  <button class="primary">Add item and get code</button>
 </form>
 ${
   items.length
     ? `<div class="table-wrap"><table>
-<thead><tr><th>Name</th><th>Description</th><th>Status</th><th></th></tr></thead>
+<thead><tr><th>Name</th><th>Description</th>${user.role === 'admin' ? '<th>Listed by</th>' : ''}<th>Status</th><th></th></tr></thead>
 <tbody>
 ${items
   .map(
     (item) => `<tr class="${item.active ? '' : 'row-retired'}">
   <td>${esc(item.name)}</td>
   <td>${esc(item.description)}</td>
+  ${user.role === 'admin' ? `<td>${esc(item.owner_name ?? 'Organization')}</td>` : ''}
   <td>${
     !item.active
       ? '<span class="badge returned">Retired</span>'
@@ -322,20 +395,20 @@ ${items
         ? '<span class="badge overdue-soft">Checked out</span>'
         : '<span class="badge ontime">Available</span>'
   }</td>
-  <td class="actions"><a href="/admin/items/${item.id}/edit">Edit</a> <a href="/admin/qr?item=${item.id}">QR code</a> <a href="/i/${esc(item.code)}">Open form</a></td>
+  <td class="actions"><a href="/admin/items/${item.id}/edit">Edit</a> <a href="/admin/qr?item=${item.id}">Code label</a> <a href="/i/${esc(item.code)}">Open form</a></td>
 </tr>`
   )
   .join('')}
 </tbody></table></div>`
-    : '<p class="card muted">No items yet. Add the first one above.</p>'
+    : '<p class="card muted">No items yet. List the first one above.</p>'
 }`,
   });
 }
 
-export function editItemPage({ item, errors = [] }) {
+export function editItemPage({ user, item, errors = [] }) {
   return layout({
     title: `Edit ${item.name}`,
-    admin: true,
+    user,
     body: `<h1>Edit item</h1>
 ${errorList(errors)}
 <form method="post" action="/admin/items/${item.id}" class="card">
@@ -350,22 +423,24 @@ ${errorList(errors)}
   });
 }
 
-export function qrSheetPage({ labels, baseUrl, single }) {
+export function qrSheetPage({ user, labels, baseUrl, single, justListed }) {
   const localWarning = /\/\/(localhost|127\.0\.0\.1)/.test(baseUrl)
     ? `<div class="alert warning no-print">These codes point to <strong>${esc(baseUrl)}</strong>, which only works on this computer. Set <code>BASE_URL</code> in <code>.env</code> to an address phones can reach before printing.</div>`
     : '';
   return layout({
-    title: 'QR codes',
-    admin: true,
+    title: 'Item codes',
+    user,
     wide: true,
     body: `<div class="page-head no-print">
-  <h1>${single ? 'QR code' : 'QR codes'}</h1>
+  <h1>${single ? 'Item code' : 'Item codes'}</h1>
   <div>
     ${single ? '<a class="button secondary" href="/admin/qr">All items</a>' : ''}
     <button class="primary" id="print-button">Print</button>
   </div>
 </div>
+${justListed ? '<div class="alert success no-print" role="status"><strong>Item listed.</strong> Print this label and attach it to the item.</div>' : ''}
 ${localWarning}
+<p class="muted small no-print">Phones scan the QR code. Handheld barcode scanners read the barcode; type or scan it into the box on the home page.</p>
 ${
   labels.length
     ? `<div class="qr-sheet">
@@ -375,12 +450,13 @@ ${labels
   ${label.svg}
   <div class="qr-name">${esc(label.name)}</div>
   <div class="qr-hint">Scan to check out or return</div>
+  <div class="barcode">${label.barcode}</div>
 </div>`
   )
   .join('')}
 </div>
 <script src="/print.js"></script>`
-    : '<p class="card muted">No active items. Add items first.</p>'
+    : '<p class="card muted">No active items. List an item first.</p>'
 }`,
   });
 }

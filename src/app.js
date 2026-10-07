@@ -1,5 +1,6 @@
 import express from 'express';
 import QRCode from 'qrcode';
+import bwipjs from 'bwip-js';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createItem } from './db.js';
@@ -8,7 +9,9 @@ import {
   parseCookies,
   safeEqual,
   createSessionValue,
-  isValidSession,
+  readSession,
+  hashPassword,
+  verifyPassword,
   sessionMaxAgeMs,
   createRateLimiter,
 } from './auth.js';
@@ -40,8 +43,18 @@ function csvCell(value) {
   return `"${cell.replaceAll('"', '""')}"`;
 }
 
-export function createApp({ db, adminPassword, sessionSecret, baseUrl = '', emailDomain = '', trustProxy = false }) {
-  if (!adminPassword) throw new Error('adminPassword is required');
+export function createApp({
+  db,
+  sessionSecret,
+  adminSignupCode = '',
+  teacherSignupCode = '',
+  baseUrl = '',
+  emailDomain = '',
+  trustProxy = false,
+}) {
+  if (adminSignupCode && adminSignupCode === teacherSignupCode) {
+    throw new Error('The admin and teacher sign-up codes must be different');
+  }
   if (!sessionSecret) throw new Error('sessionSecret is required');
   emailDomain = emailDomain.trim().toLowerCase().replace(/^@/, '');
 
@@ -51,6 +64,7 @@ export function createApp({ db, adminPassword, sessionSecret, baseUrl = '', emai
 
   const loginLimiter = createRateLimiter(8, 15 * 60 * 1000);
   const returnLimiter = createRateLimiter(5, 10 * 60 * 1000);
+  const signupLimiter = createRateLimiter(8, 15 * 60 * 1000);
 
   app.use((req, res, next) => {
     res.set({
@@ -86,6 +100,13 @@ export function createApp({ db, adminPassword, sessionSecret, baseUrl = '', emai
   // ---------- Student routes ----------
 
   app.get('/', (req, res) => res.send(views.homePage()));
+
+  // For handheld barcode scanners and typed codes: the barcode holds the item code.
+  app.get('/find', (req, res) => {
+    const code = text(req.query.code, 40).toLowerCase();
+    if (!/^[a-z0-9]+$/.test(code)) return res.redirect('/');
+    res.redirect(`/i/${code}`);
+  });
 
   app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
@@ -229,7 +250,7 @@ export function createApp({ db, adminPassword, sessionSecret, baseUrl = '', emai
     res.send(views.returnedPage({ item }));
   });
 
-  // ---------- Admin routes ----------
+  // ---------- Staff routes (admins and teachers) ----------
 
   const admin = express.Router();
 
@@ -249,45 +270,120 @@ export function createApp({ db, adminPassword, sessionSecret, baseUrl = '', emai
     next();
   });
 
+  const findUser = db.prepare('SELECT id, name, email, role, active FROM users WHERE id = ? AND active = 1');
+  // The account is looked up on every request, so deactivating someone takes effect at once.
+  const currentUser = (req) => {
+    const userId = readSession(req.cookies[ADMIN_COOKIE], sessionSecret);
+    return userId ? findUser.get(userId) ?? null : null;
+  };
+  const startSession = (req, res, userId) =>
+    res.cookie(
+      ADMIN_COOKIE,
+      createSessionValue(userId, sessionSecret),
+      cookieOptions(req, { sameSite: 'strict', path: '/admin', maxAge: sessionMaxAgeMs })
+    );
+  const signupOpen = Boolean(adminSignupCode || teacherSignupCode);
+  // Checked when the email is unknown, so a wrong email takes as long as a wrong password.
+  const dummyHash = hashPassword(randomBytes(16).toString('hex'));
+
   admin.get('/login', (req, res) => {
-    if (isValidSession(req.cookies[ADMIN_COOKIE], sessionSecret)) return res.redirect('/admin');
-    res.send(views.loginPage());
+    if (currentUser(req)) return res.redirect('/admin');
+    res.send(views.loginPage({ signupOpen }));
   });
 
   admin.post('/login', (req, res) => {
+    const email = text(req.body?.email, 254).toLowerCase();
     if (loginLimiter.isBlocked(req.ip)) {
-      return res.status(429).send(views.loginPage({ error: 'Too many attempts. Try again in 15 minutes.' }));
+      return res.status(429).send(views.loginPage({ email, signupOpen, error: 'Too many attempts. Try again in 15 minutes.' }));
     }
-    if (!safeEqual(req.body?.password ?? '', adminPassword)) {
+    const account = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    const passwordOk = verifyPassword(req.body?.password ?? '', account ? account.password_hash : dummyHash);
+    if (!account || !passwordOk || !account.active) {
       loginLimiter.recordFailure(req.ip);
-      return res.status(401).send(views.loginPage({ error: 'Wrong password.' }));
+      return res.status(401).send(views.loginPage({ email, signupOpen, error: 'Wrong email or password.' }));
     }
     loginLimiter.clear(req.ip);
-    res.cookie(
-      ADMIN_COOKIE,
-      createSessionValue(sessionSecret),
-      cookieOptions(req, { sameSite: 'strict', path: '/admin', maxAge: sessionMaxAgeMs })
-    );
+    startSession(req, res, account.id);
     res.redirect(303, '/admin');
   });
 
-  // Everything registered on this router below this line requires the admin login.
+  admin.get('/signup', (req, res) => {
+    if (!signupOpen) return res.status(404).send(views.messagePage({ title: 'Sign-up is closed', message: 'Ask an administrator for help.', status: 'warning' }));
+    res.send(views.signupPage());
+  });
+
+  admin.post('/signup', (req, res) => {
+    if (!signupOpen) return res.status(404).type('text').send('Sign-up is closed.');
+    const values = { name: text(req.body?.name, 100), email: text(req.body?.email, 254).toLowerCase() };
+    const password = String(req.body?.password ?? '');
+    const signupCode = String(req.body?.signup_code ?? '');
+    const fail = (status, errors) => res.status(status).send(views.signupPage({ values, errors }));
+
+    if (signupLimiter.isBlocked(req.ip)) return fail(429, ['Too many attempts. Try again in 15 minutes.']);
+
+    // The code decides the role. Without a valid code nobody gets an account.
+    let role = null;
+    if (adminSignupCode && safeEqual(signupCode, adminSignupCode)) role = 'admin';
+    else if (teacherSignupCode && safeEqual(signupCode, teacherSignupCode)) role = 'teacher';
+
+    const errors = [];
+    if (!values.name) errors.push('Enter your full name.');
+    if (!EMAIL_PATTERN.test(values.email)) errors.push('Enter a valid email address.');
+    if (password.length < 10) errors.push('Choose a password of 10 characters or more.');
+    else if (password.length > 200) errors.push('Choose a password of 200 characters or fewer.');
+    if (!role) {
+      signupLimiter.recordFailure(req.ip);
+      errors.push('That sign-up code is not correct.');
+    }
+    if (errors.length) return fail(400, errors);
+
+    let userId;
+    try {
+      userId = Number(
+        db
+          .prepare('INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)')
+          .run(values.name, values.email, hashPassword(password), role, new Date().toISOString()).lastInsertRowid
+      );
+    } catch (error) {
+      if (String(error.message).includes('UNIQUE')) return fail(400, ['An account with this email already exists. Log in instead.']);
+      throw error;
+    }
+    startSession(req, res, userId);
+    res.redirect(303, role === 'admin' ? '/admin' : '/admin/items');
+  });
+
+  // Everything registered on this router below this line requires a staff login.
   admin.use((req, res, next) => {
-    if (isValidSession(req.cookies[ADMIN_COOKIE], sessionSecret)) return next();
+    req.user = currentUser(req);
+    if (req.user) return next();
     if (req.method === 'GET') return res.redirect('/admin/login');
     res.status(401).type('text').send('Log in first.');
   });
+
+  const requireAdmin = (req, res, next) => {
+    if (req.user.role === 'admin') return next();
+    res.status(403).send(views.messagePage({ title: 'Admins only', message: 'Your account cannot open this page.', status: 'warning' }));
+  };
 
   admin.post('/logout', (req, res) => {
     res.clearCookie(ADMIN_COOKIE, cookieOptions(req, { sameSite: 'strict', path: '/admin' }));
     res.redirect(303, '/admin/login');
   });
 
+  // Teachers see only items they listed and the check-outs of those items. Admins see everything.
+  // Every query on items or check-outs below goes through this.
+  function ownerScope(user, where, params) {
+    if (user.role === 'admin') return;
+    where.push('i.owner_id = ?');
+    params.push(user.id);
+  }
+
   // Shared search for the dashboard, the history view and the CSV export.
-  function findCheckouts({ q = '', status = '', openOnly }) {
+  function findCheckouts(user, { q = '', status = '', openOnly }) {
     const where = [];
     const params = [];
     const today = todayLocal();
+    ownerScope(user, where, params);
     if (openOnly) where.push('c.returned_at IS NULL');
     if (q) {
       const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
@@ -321,31 +417,36 @@ export function createApp({ db, adminPassword, sessionSecret, baseUrl = '', emai
   admin.get('/', (req, res) => {
     const { q, status } = filters(req);
     const today = todayLocal();
-    const counts = db
-      .prepare(
-        `SELECT COUNT(*) AS out, COALESCE(SUM(due_date < ?), 0) AS overdue
-           FROM checkouts WHERE returned_at IS NULL`
-      )
-      .get(today);
-    res.send(views.dashboardPage({ rows: findCheckouts({ q, status, openOnly: true }), q, status, today, counts }));
+    const open = findCheckouts(req.user, { openOnly: true });
+    const counts = { out: open.length, overdue: open.filter((row) => row.due_date < today).length };
+    res.send(
+      views.dashboardPage({ user: req.user, rows: findCheckouts(req.user, { q, status, openOnly: true }), q, status, today, counts })
+    );
   });
 
   admin.get('/history', (req, res) => {
     const { q, status } = filters(req);
     res.send(
-      views.historyPage({ rows: findCheckouts({ q, status, openOnly: false }), q, status, today: todayLocal() })
+      views.historyPage({ user: req.user, rows: findCheckouts(req.user, { q, status, openOnly: false }), q, status, today: todayLocal() })
     );
   });
 
   admin.post('/checkouts/:id/return', (req, res) => {
-    markReturned.run(new Date().toISOString(), 'admin', Number(req.params.id));
+    const where = ['c.id = ?'];
+    const params = [Number(req.params.id)];
+    ownerScope(req.user, where, params);
+    const checkout = db
+      .prepare(`SELECT c.id FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
+      .get(...params);
+    if (!checkout) return res.status(404).type('text').send('Check-out not found');
+    markReturned.run(new Date().toISOString(), req.user.role, checkout.id);
     res.redirect(303, '/admin');
   });
 
   admin.get('/export.csv', (req, res) => {
     const openOnly = req.query.scope !== 'all';
     const today = todayLocal();
-    const rows = findCheckouts({ openOnly });
+    const rows = findCheckouts(req.user, { openOnly });
     const header = [
       'Item', 'Student name', 'Student ID', 'Email', 'Phone', 'Purpose',
       'Checked out', 'Due date', 'Returned', 'Returned by', 'Status',
@@ -365,39 +466,56 @@ export function createApp({ db, adminPassword, sessionSecret, baseUrl = '', emai
       .send(`﻿${[header.map(csvCell).join(','), ...lines].join('\r\n')}\r\n`);
   });
 
-  const listItems = () =>
-    db
+  function findItems(user, { id, activeOnly = false } = {}) {
+    const where = [];
+    const params = [];
+    ownerScope(user, where, params);
+    if (id !== undefined) {
+      where.push('i.id = ?');
+      params.push(id);
+    }
+    if (activeOnly) where.push('i.active = 1');
+    return db
       .prepare(
-        `SELECT i.*, EXISTS(SELECT 1 FROM checkouts c WHERE c.item_id = i.id AND c.returned_at IS NULL) AS is_out
-           FROM items i ORDER BY i.active DESC, i.name COLLATE NOCASE`
+        `SELECT i.*, u.name AS owner_name,
+                EXISTS(SELECT 1 FROM checkouts c WHERE c.item_id = i.id AND c.returned_at IS NULL) AS is_out
+           FROM items i LEFT JOIN users u ON u.id = i.owner_id
+          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+          ORDER BY i.active DESC, i.name COLLATE NOCASE`
       )
-      .all();
+      .all(...params);
+  }
 
   const itemValues = (req) => ({ name: text(req.body?.name, 100), description: text(req.body?.description, 200) });
 
-  admin.get('/items', (req, res) => res.send(views.itemsPage({ items: listItems() })));
+  admin.get('/items', (req, res) => res.send(views.itemsPage({ user: req.user, items: findItems(req.user) })));
 
+  // Listing an item makes its code at once and goes straight to the printable label.
   admin.post('/items', (req, res) => {
     const values = itemValues(req);
     if (!values.name) {
-      return res.status(400).send(views.itemsPage({ items: listItems(), values, errors: ['Enter an item name.'] }));
+      return res
+        .status(400)
+        .send(views.itemsPage({ user: req.user, items: findItems(req.user), values, errors: ['Enter an item name.'] }));
     }
-    createItem(db, values);
-    res.redirect(303, '/admin/items');
+    const itemId = createItem(db, { ...values, ownerId: req.user.id });
+    res.redirect(303, `/admin/qr?item=${itemId}&listed=1`);
   });
 
   admin.get('/items/:id/edit', (req, res) => {
-    const item = db.prepare('SELECT * FROM items WHERE id = ?').get(Number(req.params.id));
+    const [item] = findItems(req.user, { id: Number(req.params.id) });
     if (!item) return res.status(404).type('text').send('Item not found');
-    res.send(views.editItemPage({ item }));
+    res.send(views.editItemPage({ user: req.user, item }));
   });
 
   admin.post('/items/:id', (req, res) => {
-    const item = db.prepare('SELECT * FROM items WHERE id = ?').get(Number(req.params.id));
+    const [item] = findItems(req.user, { id: Number(req.params.id) });
     if (!item) return res.status(404).type('text').send('Item not found');
     const values = { ...itemValues(req), active: req.body?.active === '1' ? 1 : 0 };
     if (!values.name) {
-      return res.status(400).send(views.editItemPage({ item: { ...item, ...values }, errors: ['Enter an item name.'] }));
+      return res
+        .status(400)
+        .send(views.editItemPage({ user: req.user, item: { ...item, ...values }, errors: ['Enter an item name.'] }));
     }
     db.prepare('UPDATE items SET name = ?, description = ?, active = ? WHERE id = ?').run(
       values.name,
@@ -410,17 +528,34 @@ export function createApp({ db, adminPassword, sessionSecret, baseUrl = '', emai
 
   admin.get('/qr', async (req, res) => {
     const single = req.query.item !== undefined;
-    const items = single
-      ? db.prepare('SELECT * FROM items WHERE id = ? AND active = 1').all(Number(req.query.item))
-      : db.prepare('SELECT * FROM items WHERE active = 1 ORDER BY name COLLATE NOCASE').all();
+    const items = findItems(req.user, { id: single ? Number(req.query.item) : undefined, activeOnly: true });
     const root = (baseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
     const labels = await Promise.all(
       items.map(async (item) => ({
         name: item.name,
+        // QR code: opens the form on a phone. Barcode: the item code, for handheld scanners.
         svg: await QRCode.toString(`${root}/i/${item.code}`, { type: 'svg', errorCorrectionLevel: 'M', margin: 1 }),
+        barcode: bwipjs.toSVG({ bcid: 'code128', text: item.code, height: 10, includetext: true, textxalign: 'center' }),
       }))
     );
-    res.send(views.qrSheetPage({ labels, baseUrl: root, single }));
+    res.send(
+      views.qrSheetPage({ user: req.user, labels, baseUrl: root, single, justListed: req.query.listed === '1' && labels.length > 0 })
+    );
+  });
+
+  admin.get('/people', requireAdmin, (req, res) => {
+    const people = db.prepare('SELECT id, name, email, role, active, created_at FROM users ORDER BY role, name COLLATE NOCASE').all();
+    res.send(
+      views.peoplePage({ user: req.user, people, signup: { admin: Boolean(adminSignupCode), teacher: Boolean(teacherSignupCode) } })
+    );
+  });
+
+  admin.post('/people/:id/active', requireAdmin, (req, res) => {
+    const personId = Number(req.params.id);
+    // Admins cannot deactivate themselves, so there is always one working admin.
+    if (personId === req.user.id) return res.status(400).type('text').send('You cannot deactivate your own account.');
+    db.prepare('UPDATE users SET active = ? WHERE id = ?').run(req.body?.active === '1' ? 1 : 0, personId);
+    res.redirect(303, '/admin/people');
   });
 
   app.use('/admin', admin);

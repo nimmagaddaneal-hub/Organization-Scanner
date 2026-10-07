@@ -13,6 +13,17 @@ CREATE TABLE IF NOT EXISTS items (
   created_at  TEXT NOT NULL
 );
 
+-- Staff accounts. role is 'admin' (sees everything) or 'teacher' (sees only their own items).
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  email         TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role          TEXT NOT NULL CHECK (role IN ('admin', 'teacher')),
+  active        INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS checkouts (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id        INTEGER NOT NULL REFERENCES items(id),
@@ -41,6 +52,11 @@ export function openDb(path) {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  // Databases made before staff accounts existed have no owner column on items.
+  const itemColumns = db.prepare('PRAGMA table_info(items)').all().map((column) => column.name);
+  if (!itemColumns.includes('owner_id')) {
+    db.exec('ALTER TABLE items ADD COLUMN owner_id INTEGER REFERENCES users(id)');
+  }
   return db;
 }
 
@@ -49,9 +65,10 @@ export function newItemCode() {
   return randomBytes(6).toString('hex');
 }
 
-export function createItem(db, { name, description = '' }) {
+// ownerId is the staff member who listed the item. null means it belongs to the organization.
+export function createItem(db, { name, description = '', ownerId = null }) {
   const result = db
-    .prepare('INSERT INTO items (code, name, description, created_at) VALUES (?, ?, ?, ?)')
-    .run(newItemCode(), name, description, new Date().toISOString());
+    .prepare('INSERT INTO items (code, name, description, owner_id, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(newItemCode(), name, description, ownerId, new Date().toISOString());
   return Number(result.lastInsertRowid);
 }

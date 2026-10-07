@@ -1,4 +1,4 @@
-import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
+import { createHmac, createHash, timingSafeEqual, randomBytes, scryptSync } from 'node:crypto';
 
 export const ADMIN_COOKIE = 'admin_session';
 const SESSION_HOURS = 8;
@@ -29,17 +29,34 @@ function sign(payload, secret) {
   return createHmac('sha256', secret).update(payload).digest('base64url');
 }
 
-export function createSessionValue(secret) {
-  const payload = String(Date.now() + SESSION_HOURS * 60 * 60 * 1000);
+// The session cookie holds "userId.expiry.signature". Only the server can make a valid signature.
+export function createSessionValue(userId, secret) {
+  const payload = `${userId}.${Date.now() + SESSION_HOURS * 60 * 60 * 1000}`;
   return `${payload}.${sign(payload, secret)}`;
 }
 
-export function isValidSession(value, secret) {
-  if (!value) return false;
-  const [payload, signature] = value.split('.');
-  if (!payload || !signature) return false;
-  if (!safeEqual(signature, sign(payload, secret))) return false;
-  return Number(payload) > Date.now();
+// Returns the user id from a valid, unexpired session cookie, or null.
+export function readSession(value, secret) {
+  if (!value) return null;
+  const [userId, expiry, signature] = value.split('.');
+  if (!userId || !expiry || !signature) return null;
+  if (!safeEqual(signature, sign(`${userId}.${expiry}`, secret))) return null;
+  if (!(Number(expiry) > Date.now())) return null;
+  return Number(userId);
+}
+
+// Passwords are stored only as salted scrypt hashes.
+export function hashPassword(password) {
+  const salt = randomBytes(16);
+  return `scrypt$${salt.toString('hex')}$${scryptSync(password, salt, 64).toString('hex')}`;
+}
+
+export function verifyPassword(password, stored) {
+  const [scheme, saltHex, hashHex] = String(stored).split('$');
+  if (scheme !== 'scrypt' || !saltHex || !hashHex) return false;
+  const expected = Buffer.from(hashHex, 'hex');
+  const actual = scryptSync(String(password), Buffer.from(saltHex, 'hex'), expected.length);
+  return timingSafeEqual(actual, expected);
 }
 
 export const sessionMaxAgeMs = SESSION_HOURS * 60 * 60 * 1000;

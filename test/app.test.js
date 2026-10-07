@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { openDb, createItem } from '../src/db.js';
 import { createApp } from '../src/app.js';
 
-const ADMIN_PASSWORD = 'test-only-password';
+const ADMIN_CODE = 'test-admin-code';
+const TEACHER_CODE = 'test-teacher-code';
+const ADMIN = { name: 'Test Admin', email: 'admin@example.edu', password: 'test-only-password' };
 let server;
 let base;
 let db;
@@ -38,22 +40,29 @@ function request(path, { method = 'GET', form, cookie } = {}) {
 const cookiesFrom = (response) =>
   response.headers.getSetCookie().map((line) => line.split(';')[0]).join('; ');
 
-async function adminLogin() {
-  const response = await request('/admin/login', { method: 'POST', form: { password: ADMIN_PASSWORD } });
+async function signUp(account, code) {
+  return request('/admin/signup', { method: 'POST', form: { ...account, signup_code: code } });
+}
+
+async function login({ email, password }) {
+  const response = await request('/admin/login', { method: 'POST', form: { email, password } });
   assert.equal(response.status, 303);
   return cookiesFrom(response);
 }
+
+const adminLogin = () => login(ADMIN);
 
 before(async () => {
   db = openDb(':memory:');
   createItem(db, { name: 'Test Camera' });
   createItem(db, { name: 'Test Tripod' });
   [camera, tripod] = db.prepare('SELECT * FROM items ORDER BY id').all();
-  const app = createApp({ db, adminPassword: ADMIN_PASSWORD, sessionSecret: 'test-secret' });
+  const app = createApp({ db, sessionSecret: 'test-secret', adminSignupCode: ADMIN_CODE, teacherSignupCode: TEACHER_CODE });
   await new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', resolve);
   });
   base = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await signUp(ADMIN, ADMIN_CODE)).status, 303);
 });
 
 after(() => server.close());
@@ -85,21 +94,21 @@ test('form rejects missing and invalid fields', async () => {
 });
 
 test('every admin route requires the login', async () => {
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit']) {
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/people']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/admin/login', path);
   }
-  for (const path of ['/admin/items', '/admin/items/1', '/admin/checkouts/1/return', '/admin/logout']) {
+  for (const path of ['/admin/items', '/admin/items/1', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active']) {
     const response = await request(path, { method: 'POST', form: { name: 'x' } });
     assert.equal(response.status, 401, path);
   }
-  const forged = await request('/admin', { cookie: 'admin_session=99999999999999.forged' });
+  const forged = await request('/admin', { cookie: 'admin_session=1.99999999999999.forged' });
   assert.equal(forged.status, 302);
 });
 
 test('wrong admin password is rejected', async () => {
-  const response = await request('/admin/login', { method: 'POST', form: { password: 'wrong' } });
+  const response = await request('/admin/login', { method: 'POST', form: { email: ADMIN.email, password: 'wrong-password' } });
   assert.equal(response.status, 401);
   assert.equal(response.headers.getSetCookie().length, 0);
 });
@@ -206,7 +215,12 @@ test('admin: mark returned, overdue highlight, search, filter, CSV, items, QR', 
   assert.equal(db.prepare('SELECT returned_by FROM checkouts WHERE id = ?').get(overdueId).returned_by, 'admin');
 
   // Add and edit an item.
-  await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'New Banner', description: '' } });
+  const added = await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'New Banner', description: '' } });
+  // Listing an item goes straight to its label, with a QR code and a barcode.
+  assert.match(added.headers.get('location'), /^\/admin\/qr\?item=\d+&listed=1$/);
+  const label = await (await request(added.headers.get('location'), { cookie: adminCookie })).text();
+  assert.match(label, /Item listed/);
+  assert.equal(label.match(/<svg/g).length, 2);
   const banner = db.prepare("SELECT * FROM items WHERE name = 'New Banner'").get();
   assert.ok(banner.code);
   await request(`/admin/items/${banner.id}`, {
@@ -218,7 +232,7 @@ test('admin: mark returned, overdue highlight, search, filter, CSV, items, QR', 
 
   // QR sheet has one code per active item.
   const qr = await (await request('/admin/qr', { cookie: adminCookie })).text();
-  assert.equal(qr.match(/<svg/g).length, 3);
+  assert.equal(qr.match(/<svg/g).length, 6);
   assert.match(qr, /Club Banner/);
 
   // Retiring an item turns off its link.
@@ -243,8 +257,77 @@ test('admin form posts from the site itself are accepted', async () => {
   const response = await fetch(`${base}/admin/login`, {
     method: 'POST',
     headers: { origin: base, 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ password: ADMIN_PASSWORD }),
+    body: new URLSearchParams({ email: ADMIN.email, password: ADMIN.password }),
     redirect: 'manual',
   });
   assert.equal(response.status, 303);
+});
+
+test('sign-up needs a valid code, and the code decides the role', async () => {
+  const nobody = { name: 'No Code', email: 'nocode@example.edu', password: 'long-enough-password' };
+  const refused = await signUp(nobody, 'wrong-code');
+  assert.equal(refused.status, 400);
+  assert.equal(refused.headers.getSetCookie().length, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users WHERE email = ?').get(nobody.email).n, 0);
+
+  const weak = await signUp({ ...nobody, password: 'short' }, TEACHER_CODE);
+  assert.equal(weak.status, 400);
+
+  const teacher = { name: 'Role Teacher', email: 'role.teacher@example.edu', password: 'long-enough-password' };
+  assert.equal((await signUp(teacher, TEACHER_CODE)).status, 303);
+  const stored = db.prepare('SELECT * FROM users WHERE email = ?').get(teacher.email);
+  assert.equal(stored.role, 'teacher');
+  assert.doesNotMatch(stored.password_hash, /long-enough-password/);
+
+  // The same email cannot sign up twice.
+  assert.equal((await signUp(teacher, ADMIN_CODE)).status, 400);
+  assert.equal(db.prepare('SELECT role FROM users WHERE email = ?').get(teacher.email).role, 'teacher');
+});
+
+test('teacher lists an item, gets a code, and sees only their own items and check-outs', async () => {
+  const teacher = { name: 'Ms Rivera', email: 'rivera@example.edu', password: 'long-enough-password' };
+  const teacherCookie = cookiesFrom(await signUp(teacher, TEACHER_CODE));
+
+  // List an item and land on its label.
+  const added = await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Lab Microscope' } });
+  const label = await (await request(added.headers.get('location'), { cookie: teacherCookie })).text();
+  assert.match(label, /Lab Microscope/);
+  const microscope = db.prepare("SELECT * FROM items WHERE name = 'Lab Microscope'").get();
+  assert.equal(label.match(/<svg/g).length, 2);
+
+  // The barcode value opens the item form.
+  const found = await request(`/find?code=${microscope.code.toUpperCase()}`);
+  assert.equal(found.headers.get('location'), `/i/${microscope.code}`);
+
+  // One check-out on the teacher's item, one on an organization item.
+  await request(`/i/${microscope.code}/checkout`, { method: 'POST', form: student({ student_name: 'Micro Mia', student_id: '777' }) });
+  await request(`/i/${camera.code}/checkout`, { method: 'POST', form: student({ student_name: 'Camera Cam', student_id: '888' }) });
+
+  for (const path of ['/admin', '/admin/history', '/admin/export.csv?scope=all', '/admin/items', '/admin/qr']) {
+    const page = await (await request(path, { cookie: teacherCookie })).text();
+    assert.doesNotMatch(page, /Camera Cam|Test Camera|Test Student|Late Larry/, path);
+  }
+  assert.match(await (await request('/admin', { cookie: teacherCookie })).text(), /Micro Mia/);
+
+  // The teacher cannot touch other people's items or check-outs, or the People page.
+  const cameraCheckout = db.prepare("SELECT id FROM checkouts WHERE student_id = '888' AND returned_at IS NULL").get();
+  assert.equal((await request(`/admin/checkouts/${cameraCheckout.id}/return`, { method: 'POST', cookie: teacherCookie })).status, 404);
+  assert.equal((await request(`/admin/items/${camera.id}/edit`, { cookie: teacherCookie })).status, 404);
+  assert.equal((await request(`/admin/items/${camera.id}`, { method: 'POST', cookie: teacherCookie, form: { name: 'Hacked' } })).status, 404);
+  assert.equal((await request(`/admin/qr?item=${camera.id}`, { cookie: teacherCookie })).status, 200);
+  assert.doesNotMatch(await (await request(`/admin/qr?item=${camera.id}`, { cookie: teacherCookie })).text(), /<svg/);
+  assert.equal((await request('/admin/people', { cookie: teacherCookie })).status, 403);
+
+  // The teacher can mark their own item returned.
+  const ownCheckout = db.prepare("SELECT id FROM checkouts WHERE student_id = '777' AND returned_at IS NULL").get();
+  assert.equal((await request(`/admin/checkouts/${ownCheckout.id}/return`, { method: 'POST', cookie: teacherCookie })).status, 303);
+
+  // The admin sees both, and can deactivate the teacher, which ends the teacher's session at once.
+  const adminCookie = await adminLogin();
+  assert.match(await (await request('/admin', { cookie: adminCookie })).text(), /Camera Cam/);
+  assert.match(await (await request('/admin/items', { cookie: adminCookie })).text(), /Ms Rivera/);
+  const teacherId = db.prepare('SELECT id FROM users WHERE email = ?').get(teacher.email).id;
+  await request(`/admin/people/${teacherId}/active`, { method: 'POST', cookie: adminCookie, form: { active: '0' } });
+  assert.equal((await request('/admin', { cookie: teacherCookie })).status, 302);
+  assert.equal((await request('/admin/login', { method: 'POST', form: { email: teacher.email, password: teacher.password } })).status, 401);
 });

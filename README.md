@@ -3,21 +3,22 @@
 A scan-to-check-out system for a school organization.
 
 - **Students** scan the QR code on an item with their phone camera, fill out a short form, and the item is logged as checked out. No app and no login.
-- **Administrators** log in to a separate page to see everything that is checked out, mark items returned, manage the inventory, export to CSV, and print QR codes.
+- **Teachers** sign up for an account, list their own items, and get a printable QR code and barcode for each one right away. They see check-outs of their own items only.
+- **Administrators** sign up for an account and see everything: all check-outs, all items, history, CSV export, code labels, and the list of staff accounts.
 
 ## What it is built with
 
 - [Node.js](https://nodejs.org) 22.13 or newer (uses the SQLite support built into Node, so there is no database to install)
 - [Express](https://expressjs.com) for the web server
 - SQLite for storage: one file, `data/checkout.db`
-- [qrcode](https://www.npmjs.com/package/qrcode) to draw the QR codes
+- [qrcode](https://www.npmjs.com/package/qrcode) and [bwip-js](https://www.npmjs.com/package/bwip-js) to draw the QR codes and barcodes
 
 ```
 src/server.js   starts the server, reads settings
 src/app.js      all routes (student form, admin pages)
 src/views.js    the HTML pages
 src/db.js       database tables
-src/auth.js     admin login cookie, rate limiting
+src/auth.js     password hashing, login cookie, rate limiting
 src/seed.js     adds sample items
 public/         stylesheet
 test/           automated tests
@@ -35,7 +36,7 @@ test/           automated tests
    cp .env.example .env
    ```
 4. Open `.env` and set at least:
-   - `ADMIN_PASSWORD`: the password for the admin page (8 characters or more).
+   - `ADMIN_SIGNUP_CODE` and `TEACHER_SIGNUP_CODE`: two different secret codes, 8 characters or more (see [Staff accounts](#staff-accounts)).
    - `SESSION_SECRET`: a long random string. Make one with
      `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
    - `BASE_URL`: the address phones use to reach the site (see [Testing with a real phone](#testing-with-a-real-phone)).
@@ -51,8 +52,9 @@ npm start
 
 Then open:
 
-- Admin page: <http://localhost:3000/admin>
-- A student form: log in as admin, go to **Items**, and click **Open form** next to an item.
+- Create the first admin account: <http://localhost:3000/admin/signup> (use the `ADMIN_SIGNUP_CODE` from `.env`)
+- Staff login: <http://localhost:3000/admin>
+- A student form: log in, go to **Items**, and click **Open form** next to an item.
 
 `npm run dev` restarts the server automatically when you edit a file.
 
@@ -63,26 +65,41 @@ A phone cannot open `localhost`. To scan real QR codes while the system runs on 
 1. Connect the phone and the computer to the same Wi-Fi.
 2. Find the computer's IP address (Mac: `ipconfig getifaddr en0`).
 3. Set `BASE_URL=http://THAT-IP:3000` in `.env` and restart the server.
-4. Open **QR codes** in the admin page and scan a code from the screen.
+4. Open **Codes** in the staff pages and scan a QR code from the screen.
 
 Some school Wi-Fi networks block devices from talking to each other. If the phone cannot connect, deploy the system (below) or use a phone hotspot.
 
-## Log in as an admin
+## Staff accounts
 
-Go to `/admin` and enter the `ADMIN_PASSWORD` from `.env` (or from your hosting provider's settings). There is one shared admin password. The login lasts 8 hours. After 8 wrong passwords, logins from that address are blocked for 15 minutes.
+There are two kinds of staff account. Both sign up at `/admin/signup` with a name, email, password (10 characters or more) and a sign-up code. **The code decides the role.**
 
-To change the password, change `ADMIN_PASSWORD` and restart the server.
+| Role | Sign-up code | Can do |
+| --- | --- | --- |
+| Admin | `ADMIN_SIGNUP_CODE` | Everything: all items, all check-outs, history, CSV, code labels, **People** page |
+| Teacher | `TEACHER_SIGNUP_CODE` | List items, print their codes, see and return check-outs of **their own items only** |
 
-## Add items and print QR codes
+- Hand the admin code only to people who may see all student data. Anyone with that code can make an admin account.
+- To close sign-up, empty the code in `.env` (or your host's settings) and restart. Existing accounts keep working.
+- Admins open **People** to see all accounts and to **Deactivate** one. A deactivated account is logged out at once.
+- Log in at `/admin` with email and password. The login lasts 8 hours. After 8 wrong passwords, logins from that address are blocked for 15 minutes.
+- There is no "forgot password" email. If someone forgets their password, an admin deactivates the account and the person signs up again with a different email. (Or delete their row from the `users` table and they can sign up again with the same email.)
+- Passwords are stored only as salted scrypt hashes.
+
+## List items and print codes
 
 1. Log in and open **Items**.
-2. Type a name (and an optional description) under **Add an item** and click **Add item**. Each item gets its own random code.
-3. Click **Print all QR codes** for a sheet with every item, or **QR code** next to one item for a single label. Click **Print**.
-4. Cut the labels out and stick them on the items.
+2. Under **List an item**, type a name (and an optional description) and click **Add item and get code**.
+3. The label for that item opens at once, with:
+   - a **QR code**, which students scan with a phone camera to open the form;
+   - a **barcode** (Code 128) holding the item's code, for handheld barcode scanners.
+4. Click **Print**, cut the label out, and stick it on the item.
+5. **Codes** in the menu (or **Print all codes**) gives a sheet with every item you can see.
 
-Important: the QR codes contain `BASE_URL`. **Set `BASE_URL` to the final address before you print.** If the address changes later, print the codes again.
+Phone cameras open QR codes but do not open links from ordinary barcodes. To use the barcode, open the site's home page, click in the code box, and scan the barcode with a handheld scanner (or type the code printed under it). The form for that item opens.
 
-To change an item, click **Edit**. Unchecking **Active** retires the item: its QR code stops working and its history is kept. Items are never deleted, so history stays complete.
+Important: the QR codes contain `BASE_URL`. **Set `BASE_URL` to the final address before you print.** If the address changes later, print the codes again. (Barcodes do not contain the address and stay valid.)
+
+To change an item, click **Edit**. Unchecking **Active** retires the item: its codes stop working and its history is kept. Items are never deleted, so history stays complete. Teachers can edit only items they listed. The sample items belong to the organization, so only admins see them.
 
 ## How it works for students
 
@@ -106,10 +123,10 @@ This repo includes a `Dockerfile` and `fly.toml` for it. Fly.io requires a credi
    ```bash
    fly launch --no-deploy        # pick an app name; keep the existing fly.toml settings
    fly volumes create checkout_data --size 1
-   fly secrets set ADMIN_PASSWORD="your-password" SESSION_SECRET="long-random-string" BASE_URL="https://YOUR-APP-NAME.fly.dev"
+   fly secrets set ADMIN_SIGNUP_CODE="admin-code" TEACHER_SIGNUP_CODE="teacher-code" SESSION_SECRET="long-random-string" BASE_URL="https://YOUR-APP-NAME.fly.dev"
    fly deploy
    ```
-3. Open `https://YOUR-APP-NAME.fly.dev/admin`, add items, and print the QR codes.
+3. Open `https://YOUR-APP-NAME.fly.dev/admin/signup`, create your admin account, list items, and print the codes.
 
 Optional secrets: `SCHOOL_EMAIL_DOMAIN` and `TZ` (example: `America/Chicago`). Set `TZ` on a host, or due dates use UTC.
 
@@ -124,7 +141,8 @@ All data is in the file at `DATABASE_PATH`. Copy that file to back it up. Also u
 
 ## Privacy and security
 
-- Student data is shown only on admin pages. Every admin page and action requires the admin login.
+- Student data is shown only on staff pages. Every staff page and action requires a login. Teachers see student data only for check-outs of their own items; admins see all of it.
+- Nobody can make a staff account without a sign-up code.
 - The student pages never show who has an item. Returning an item needs either the phone that checked it out or the matching student ID **and** email; wrong guesses are limited to 5 per 10 minutes.
 - No credentials are in the code. All settings come from environment variables.
 - The database refuses a second open check-out for the same item, even if two students submit at the same moment.
@@ -134,7 +152,9 @@ All data is in the file at `DATABASE_PATH`. Copy that file to back it up. Also u
 
 - **The repo was empty** (README only), so there was no existing form or framework to build on. Node + Express + SQLite was chosen because it needs no separate database and few dependencies.
 - **"Same student" without a login:** at check-out, the phone saves a private cookie for that item. Scanning again from that phone shows **Return this item**. From another phone, the student enters their student ID and email to return.
-- **One shared admin password** instead of separate admin accounts.
+- **Sign-up is protected by codes.** An open sign-up page would let anyone become an admin and read student data, so each role needs its code.
+- **Teachers are a separate, limited role.** They see only their own items and those items' check-outs.
+- **"Barcode" means both:** every label has a QR code (for phones) and a Code 128 barcode (for handheld scanners).
 - **Items are retired, not deleted**, so history is never lost.
 - **Overdue** means the expected return date is before today. An item due today is on time.
 - **Email domain is not enforced** unless you set `SCHOOL_EMAIL_DOMAIN`.
@@ -153,18 +173,22 @@ The automated tests cover the checklist below.
 
 Run these by hand after setup or after any change:
 
-- [ ] `npm run seed`, `npm start`, log in at `/admin` with the password from `.env`.
+- [ ] `npm run seed`, `npm start`.
 - [ ] `/admin` without logging in redirects to the login page. A wrong password is rejected.
-- [ ] **Items** shows the sample items. Add an item. Edit its name.
-- [ ] **QR codes** shows one code per item. **Print** opens the print dialog.
-- [ ] Scan a code (or click **Open form**). The item name and check-out time are filled in and read-only.
+- [ ] `/admin/signup` with a wrong code is refused. With the admin code it creates an admin account and logs in.
+- [ ] Sign up a second account with the teacher code. It lands on **Items** and sees no sample items and no **People** link.
+- [ ] As the teacher, list an item. The label opens with a QR code and a barcode. **Print** opens the print dialog.
+- [ ] Scan the QR code (or click **Open form**). The item name and check-out time are filled in and read-only.
+- [ ] On the home page, type the code printed under the barcode. The same form opens.
 - [ ] Submit the form empty. Errors appear and nothing is saved.
 - [ ] Submit the form with valid details. The confirmation screen appears.
-- [ ] The check-out appears on the admin dashboard with item, name, student ID, email, dates and **On time**.
+- [ ] The check-out appears on the teacher's dashboard with item, name, student ID, email, dates and **On time**. The admin sees it too.
+- [ ] A check-out of a sample item appears for the admin and not for the teacher.
 - [ ] Open the same item link in a private window (a "different student"). It shows **Unavailable** and no student details. A duplicate check-out is not possible.
 - [ ] In the private window, try to return with a wrong student ID and email. It is refused.
 - [ ] Scan again on the original phone. **Return this item** is offered and works. The item is available again.
-- [ ] Check out an item, then click **Mark returned** on the dashboard. It leaves the dashboard and appears in **History** as returned by admin.
+- [ ] Check out an item, then click **Mark returned** on the dashboard. It leaves the dashboard and appears in **History** as returned.
 - [ ] Check out an item with today as the return date, wait until tomorrow (or edit the date in the database). The row is highlighted **Overdue**.
 - [ ] Search by student name and by item name. Filter by **Overdue**.
 - [ ] **Export CSV** downloads a file that opens in a spreadsheet.
+- [ ] As admin, open **People** and deactivate the teacher. The teacher is logged out and cannot log in.

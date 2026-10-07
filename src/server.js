@@ -3,26 +3,33 @@ import { databasePath } from './config.js';
 import { openDb } from './db.js';
 import { createApp } from './app.js';
 
-const adminPassword = process.env.ADMIN_PASSWORD;
-if (!adminPassword) {
-  console.error('ADMIN_PASSWORD is not set. Copy .env.example to .env and choose a password.');
-  process.exit(1);
-}
-if (adminPassword.length < 8) {
-  console.error('ADMIN_PASSWORD must be at least 8 characters.');
-  process.exit(1);
-}
-
 let sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) {
   sessionSecret = randomBytes(32).toString('hex');
   console.warn('SESSION_SECRET is not set. Admins are logged out every time the server restarts.');
 }
 
+const db = openDb(databasePath);
+const adminSignupCode = process.env.ADMIN_SIGNUP_CODE || '';
+const teacherSignupCode = process.env.TEACHER_SIGNUP_CODE || '';
+
+for (const [name, code] of [['ADMIN_SIGNUP_CODE', adminSignupCode], ['TEACHER_SIGNUP_CODE', teacherSignupCode]]) {
+  if (code && code.length < 8) {
+    console.error(`${name} must be at least 8 characters.`);
+    process.exit(1);
+  }
+}
+const { admins } = db.prepare("SELECT COUNT(*) AS admins FROM users WHERE role = 'admin' AND active = 1").get();
+if (admins === 0 && !adminSignupCode) {
+  console.error('There is no admin account yet. Set ADMIN_SIGNUP_CODE in .env, start again, and sign up at /admin/signup.');
+  process.exit(1);
+}
+
 const app = createApp({
-  db: openDb(databasePath),
-  adminPassword,
+  db,
   sessionSecret,
+  adminSignupCode,
+  teacherSignupCode,
   baseUrl: process.env.BASE_URL || '',
   emailDomain: process.env.SCHOOL_EMAIL_DOMAIN || '',
   trustProxy: process.env.TRUST_PROXY === '1',
@@ -31,5 +38,6 @@ const app = createApp({
 const port = Number(process.env.PORT) || 3000;
 app.listen(port, () => {
   console.log(`Check-out system running on http://localhost:${port}`);
-  console.log(`Admin page: http://localhost:${port}/admin`);
+  console.log(`Staff login: http://localhost:${port}/admin`);
+  if (admins === 0) console.log(`No admin account yet. Create one at http://localhost:${port}/admin/signup`);
 });
