@@ -1,0 +1,27 @@
+# Render blueprint: a free web service. Data lives in a free Turso database (see README, "Deploy").
+services:
+  - type: web
+    name: organization-scanner
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: SESSION_SECRET
+        generateValue: true
+      # Render asks for these when you create the service.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: ADMIN_SIGNUP_CODE
+        sync: false
+      - key: TEACHER_SIGNUP_CODE
+        sync: false
+      - key: TZ
+        sync: false

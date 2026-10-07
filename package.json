@@ -1,0 +1,22 @@
+{
+  "name": "checkout-request-for-organization",
+  "version": "1.0.0",
+  "description": "Scan-to-check-out system for a school organization",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node src/seed.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "bwip-js": "^4.11.4",
+    "express": "^5.2.1",
+    "qrcode": "^1.5.4"
+  }
+}
