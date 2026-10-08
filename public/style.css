@@ -458,3 +458,36 @@ td form { margin: 0; }
 dl.codes { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
 dl.codes dt { color: var(--muted); }
 dl.codes dd { margin: 0; }
+
+/* Side by side */
+.compare { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 22px; max-width: 980px; margin: 0 auto; align-items: start; }
+.compare-theirs { display: grid; gap: 14px; }
+.theirs-card { padding: 18px; border: 1px dashed var(--border-strong); border-radius: 12px; background: transparent; color: var(--muted); }
+.theirs-card h3 { margin: 6px 0 8px; font-size: 1rem; font-weight: 600; color: var(--text); }
+.cross { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 0.9rem; }
+.cross li { position: relative; padding-left: 22px; }
+.cross li::before { content: "\2715"; position: absolute; left: 0; color: var(--error-text); font-size: 0.8rem; top: 1px; }
+.compare-ours { padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.callouts { list-style: none; counter-reset: callout; margin: 6px 0 0; padding: 0; display: grid; gap: 10px; font-size: 0.92rem; color: var(--muted); }
+.callouts li { counter-increment: callout; position: relative; padding-left: 34px; }
+.callouts li::before { content: counter(callout); position: absolute; left: 0; top: -1px; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; background: var(--primary); color: var(--primary-text); font-size: 0.8rem; font-weight: 600; }
+.callouts strong { color: var(--text); }
+@media (max-width: 800px) { .compare { grid-template-columns: 1fr; } }
+
+.iso { display: block; width: 100%; height: auto; margin: 4px 0 8px; overflow: visible; }
+.iso-ground { fill: var(--surface-2); stroke: var(--border-strong); stroke-width: 1; }
+.iso-grid { stroke: var(--border); stroke-width: 1; }
+.iso-side-l { fill: var(--surface-2); stroke: var(--text); stroke-width: 1.2; stroke-linejoin: round; }
+.iso-side-r { fill: var(--border); stroke: var(--text); stroke-width: 1.2; stroke-linejoin: round; }
+.iso-top { fill: var(--surface); stroke: var(--text); stroke-width: 1.2; stroke-linejoin: round; }
+.iso-qr { fill: var(--text); }
+.iso-link { stroke: var(--muted); stroke-width: 1.4; stroke-dasharray: 5 5; }
+.iso-stem { stroke-dasharray: none; stroke: var(--text); }
+.iso-orb { fill: var(--surface); stroke: var(--text); stroke-width: 1.4; }
+.iso-ring { fill: none; stroke: var(--text); stroke-width: 1; opacity: 0.6; }
+.iso-row { stroke: var(--muted); stroke-width: 1.6; stroke-linecap: round; }
+.iso-row-alert { stroke: var(--error-text); stroke-width: 2.6; }
+.iso-label { font: 600 12px var(--mono); fill: var(--text); }
+.iso-small { font: 10px var(--mono); fill: var(--muted); }
+.iso-pin circle { fill: var(--primary); stroke: var(--surface); stroke-width: 2; }
+.iso-pin text { font: 700 11px system-ui, sans-serif; fill: var(--primary-text); }

@@ -148,6 +148,32 @@
     ctx.fill();
     ctx.strokeStyle = `rgba(${ink}, 0.45)`;
     ctx.stroke();
+
+    // Label: this orb is your organization. A small tag with a leader line to the core.
+    ctx.font = '600 13px ui-monospace, Menlo, Consolas, monospace';
+    const label = 'Your organization';
+    const padX = 10;
+    const tagWidth = ctx.measureText(label).width + padX * 2;
+    const tagHeight = 26;
+    const tagX = Math.max(10, Math.min(width - tagWidth - 10, cx + core * 1.8));
+    const tagY = Math.max(10, cy - scale * 1.05);
+    const sheet = getComputedStyle(canvas).getPropertyValue('--sheet').trim() || '#fff';
+    ctx.strokeStyle = `rgba(${ink}, 0.7)`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx + core * 0.7, cy - core * 0.7);
+    ctx.lineTo(tagX + 8, tagY + tagHeight);
+    ctx.stroke();
+    ctx.fillStyle = sheet;
+    ctx.beginPath();
+    ctx.roundRect(tagX, tagY, tagWidth, tagHeight, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = `rgba(${ink}, 0.95)`;
+    ctx.fillText(label, tagX + padX, tagY + 17);
+    ctx.beginPath();
+    ctx.arc(cx + core * 0.7, cy - core * 0.7, 3, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   // Drag to rotate. A click without moving makes a new sculpture.

@@ -52,7 +52,7 @@ function layout({ title, body, user = null, student = null, active = '', wide = 
       ${themeButton}
     </div>`
         : landing
-          ? `<nav class="nav-links" aria-label="Page"><a href="#how">How it works</a><a href="#features">Features</a><a href="#demo">For schools</a></nav>
+          ? `<nav class="nav-links" aria-label="Page"><a href="#compare">Compare</a><a href="#how">How it works</a><a href="#features">Features</a><a href="#demo">For schools</a></nav>
     <div class="nav-user">${themeButton}${studentMenu}<a class="button primary small" href="#demo">Request a demo</a></div>`
           : `<div class="nav-user">${themeButton}${studentMenu}</div>`
     }
@@ -141,11 +141,49 @@ export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
     </form>
   </div>
   <div class="hero-art">
-    <canvas id="ink-canvas" aria-label="Decorative 3D sculpture. Drag to rotate, click to make a new one." role="img"></canvas>
+    <canvas id="ink-canvas" aria-label="Your organization, shown as a 3D sculpture. Drag to rotate, click to make a new one." role="img"></canvas>
     <span class="corner tl">N 00&deg;</span>
     <span class="corner tr">SCAN &middot; 3D</span>
-    <span class="corner bl">Drag to rotate &middot; Click to reforge</span>
+    <span class="corner bl">Drag your organization &middot; Click to reforge</span>
     <span class="corner br" id="ink-seed">seed 04211</span>
+  </div>
+</section>
+
+<section class="sheet section" id="compare">
+  <div class="section-head">
+    <span class="pill">Side by side</span>
+    <h2>That is theirs. <span class="accent">Ours is here, here and here.</span></h2>
+  </div>
+  <div class="compare">
+    <div class="compare-theirs">
+      <div class="theirs-card">
+        <span class="mono">THIS IS THEIRS</span>
+        <h3>The paper sign-out sheet</h3>
+        <ul class="cross">
+          <li>Nobody knows who has it until someone checks the clipboard.</li>
+          <li>Handwriting you cannot read. Rows nobody filled in.</li>
+          <li>Late items are found by accident.</li>
+        </ul>
+      </div>
+      <div class="theirs-card">
+        <span class="mono">AND THAT IS THEIRS</span>
+        <h3>The shared spreadsheet</h3>
+        <ul class="cross">
+          <li>Someone has to type every row, every time.</li>
+          <li>Two people can take the same item at once.</li>
+          <li>Everyone who can open it sees every student.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="compare-ours frame">
+      <span class="mono">OURS</span>
+      <svg class="iso" viewBox="40 212 440 292" role="img" aria-label="Three-dimensional diagram: labelled items, a student account link and a dashboard all connected to your organization" xmlns="http://www.w3.org/2000/svg"><polygon class="iso-ground" points="260.0,250.0 466.1,369.0 260.0,488.0 53.9,369.0"/><line class="iso-grid" x1="289.4" y1="267.0" x2="83.3" y2="386.0"/><line class="iso-grid" x1="230.6" y1="267.0" x2="436.7" y2="386.0"/><line class="iso-grid" x1="318.9" y1="284.0" x2="112.8" y2="403.0"/><line class="iso-grid" x1="201.1" y1="284.0" x2="407.2" y2="403.0"/><line class="iso-grid" x1="348.3" y1="301.0" x2="142.2" y2="420.0"/><line class="iso-grid" x1="171.7" y1="301.0" x2="377.8" y2="420.0"/><line class="iso-grid" x1="377.8" y1="318.0" x2="171.7" y2="437.0"/><line class="iso-grid" x1="142.2" y1="318.0" x2="348.3" y2="437.0"/><line class="iso-grid" x1="407.2" y1="335.0" x2="201.1" y2="454.0"/><line class="iso-grid" x1="112.8" y1="335.0" x2="318.9" y2="454.0"/><line class="iso-grid" x1="436.7" y1="352.0" x2="230.6" y2="471.0"/><line class="iso-grid" x1="83.3" y1="352.0" x2="289.4" y2="471.0"/><line class="iso-link" x1="260.0" y1="297.6" x2="260.0" y2="369.0"/><line class="iso-link" x1="383.7" y1="369.0" x2="260.0" y2="369.0"/><line class="iso-link" x1="136.3" y1="369.0" x2="260.0" y2="369.0"/><line class="iso-link" x1="260.0" y1="440.4" x2="260.0" y2="369.0"/><g><polygon class="iso-side-l" points="218.8,297.6 260.0,321.4 260.0,280.6 218.8,256.8"/><polygon class="iso-side-r" points="301.2,297.6 260.0,321.4 260.0,280.6 301.2,256.8"/><polygon class="iso-top" points="260.0,233.0 301.2,256.8 260.0,280.6 218.8,256.8"/></g><polygon class="iso-qr" points="260.0,241.6 269.9,247.3 260.0,253.0 250.1,247.3"/><polygon class="iso-qr" points="276.5,251.1 286.4,256.8 276.5,262.5 266.6,256.8"/><polygon class="iso-qr" points="243.5,251.1 253.4,256.8 243.5,262.5 233.6,256.8"/><polygon class="iso-qr" points="260.0,262.5 267.4,266.8 260.0,271.1 252.6,266.8"/><g><polygon class="iso-side-l" points="342.4,369.0 383.7,392.8 383.7,352.0 342.4,328.2"/><polygon class="iso-side-r" points="424.9,369.0 383.7,392.8 383.7,352.0 424.9,328.2"/><polygon class="iso-top" points="383.7,304.4 424.9,328.2 383.7,352.0 342.4,328.2"/></g><polygon class="iso-qr" points="383.7,313.0 393.6,318.7 383.7,324.4 373.8,318.7"/><polygon class="iso-qr" points="400.2,322.5 410.1,328.2 400.2,333.9 390.3,328.2"/><polygon class="iso-qr" points="367.2,322.5 377.1,328.2 367.2,333.9 357.3,328.2"/><polygon class="iso-qr" points="383.7,333.9 391.1,338.2 383.7,342.5 376.2,338.2"/><g><polygon class="iso-side-l" points="95.1,369.0 136.3,392.8 136.3,352.0 95.1,328.2"/><polygon class="iso-side-r" points="177.6,369.0 136.3,392.8 136.3,352.0 177.6,328.2"/><polygon class="iso-top" points="136.3,304.4 177.6,328.2 136.3,352.0 95.1,328.2"/></g><polygon class="iso-qr" points="136.3,313.0 146.2,318.7 136.3,324.4 126.4,318.7"/><polygon class="iso-qr" points="152.8,322.5 162.7,328.2 152.8,333.9 142.9,328.2"/><polygon class="iso-qr" points="119.8,322.5 129.7,328.2 119.8,333.9 109.9,328.2"/><polygon class="iso-qr" points="136.3,333.9 143.8,338.2 136.3,342.5 128.9,338.2"/><g><polygon class="iso-side-l" points="207.0,437.0 265.9,471.0 265.9,462.5 207.0,428.5"/><polygon class="iso-side-r" points="313.0,443.8 265.9,471.0 265.9,462.5 313.0,435.3"/><polygon class="iso-top" points="254.1,401.3 313.0,435.3 265.9,462.5 207.0,428.5"/></g><line class="iso-row" x1="253.5" y1="411.8" x2="294.7" y2="435.6"/><line class="iso-row" x1="240.3" y1="419.5" x2="281.6" y2="443.3"/><line class="iso-row" x1="227.1" y1="427.1" x2="268.4" y2="450.9"/><line class="iso-row iso-row-alert" x1="253.5" y1="411.8" x2="268.2" y2="420.3"/><g><polygon class="iso-side-l" points="207.0,369.0 260.0,399.6 260.0,393.5 207.0,362.9"/><polygon class="iso-side-r" points="313.0,369.0 260.0,399.6 260.0,393.5 313.0,362.9"/><polygon class="iso-top" points="260.0,332.3 313.0,362.9 260.0,393.5 207.0,362.9"/></g><line class="iso-link iso-stem" x1="260.0" y1="362.9" x2="260.0" y2="250.4"/><circle class="iso-orb" cx="260.0" cy="270.4" r="26"/><ellipse class="iso-ring" cx="260.0" cy="270.4" rx="26" ry="9"/><ellipse class="iso-ring iso-ring-b" cx="260.0" cy="270.4" rx="9" ry="26"/><text class="iso-label" x="260.0" y="230.4" text-anchor="middle">Your organization</text><text class="iso-small" x="226.0" y="248.8" text-anchor="end">Items</text><text class="iso-small" x="417.7" y="320.2" text-anchor="start">Items</text><text class="iso-small" x="106.3" y="387.0" text-anchor="end">Items</text><text class="iso-small" x="300.0" y="476.4" text-anchor="start">Dashboard</text><g class="iso-pin"><circle cx="389.7" cy="298.2" r="11"/><text x="389.7" y="302.2" text-anchor="middle">1</text></g><g class="iso-pin"><circle cx="198.2" cy="369.0" r="11"/><text x="198.2" y="373.0" text-anchor="middle">2</text></g><g class="iso-pin"><circle cx="254.0" cy="405.9" r="11"/><text x="254.0" y="409.9" text-anchor="middle">3</text></g></svg>
+      <ol class="callouts">
+        <li><strong>Here:</strong> a QR label on the item. Scan it and the form opens, with no app.</li>
+        <li><strong>And here:</strong> every check-out is tied to a student account, so you always know who has what.</li>
+        <li><strong>And here:</strong> one dashboard shows what is out and what is late. Each school sees only its own.</li>
+      </ol>
+    </div>
   </div>
 </section>
 
