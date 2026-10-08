@@ -145,6 +145,10 @@ Replying to the email answers the person who asked. Then you set their school up
 
 Without these settings, requests are still saved, but you are not told. The server log says so at start. A hidden field and a limit of 5 requests per hour per address keep bots out.
 
+## Home page animation
+
+The home page has a scroll story: as you scroll, items, a dashboard and "your organization" drop onto an isometric ground, and each landing sends a pixelated ripple across the tiles. It is drawn on a small canvas (`public/story.js`) and scaled up without smoothing for the pixel look. Falling follows the scroll position, so scrolling back up lifts everything again. If the visitor's device asks for reduced motion, the finished scene is shown without animation. The orb in the first section (`public/hero.js`) can be dragged.
+
 ## How it works for students
 
 1. Create a student account once, or log in.

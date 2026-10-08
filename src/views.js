@@ -149,6 +149,30 @@ export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
   </div>
 </section>
 
+<section class="story" id="system">
+  <div class="section-head">
+    <span class="pill">The system</span>
+    <h2>Scroll, and watch it <span class="accent">land.</span></h2>
+  </div>
+  <div class="story-track">
+    <div class="story-stage">
+      <div class="story-art frame">
+        <canvas id="story-canvas" aria-hidden="true"></canvas>
+        <span class="corner tl">Scroll &darr;</span>
+        <span class="corner br">pixel &middot; 3D</span>
+      </div>
+      <div class="story-copy">
+        <div class="story-bar" aria-hidden="true"><span></span></div>
+        <ol class="story-steps">
+          <li class="story-step" data-n="1"><span class="mono">01</span><h3>Label your items</h3><p>Every item gets a QR code and a barcode. Print them, stick them on.</p></li>
+          <li class="story-step" data-n="2"><span class="mono">02</span><h3>See it all in one place</h3><p>One dashboard shows what is out, who has it, and what is late.</p></li>
+          <li class="story-step" data-n="3"><span class="mono">03</span><h3>Your organization</h3><p>Students scan to check out and return. Everything in circulation, accounted for.</p></li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section class="sheet section" id="compare">
   <div class="section-head">
     <span class="pill">Side by side</span>
@@ -278,7 +302,8 @@ export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
 </section>
 
 <p class="mono site-footer">Item Check-out &middot; for school organizations</p>
-<script src="/hero.js" defer></script>`,
+<script src="/hero.js" defer></script>
+<script src="/story.js" defer></script>`,
   });
 }
 
