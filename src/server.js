@@ -39,9 +39,17 @@ const notifyDemo = makeDemoNotifier({
 });
 if (!notifyDemo) console.warn('DEMO_NOTIFY_EMAIL and RESEND_API_KEY are not both set. Demo requests are saved but not emailed.');
 
+// The owner page (schools, demo requests, account help) is off unless this is set.
+const ownerPassword = process.env.OWNER_PASSWORD || '';
+if (ownerPassword && ownerPassword.length < 12) {
+  console.error('OWNER_PASSWORD must be at least 12 characters.');
+  process.exit(1);
+}
+
 const app = createApp({
   db,
   sessionSecret,
+  ownerPassword,
   notifyDemo: notifyDemo ?? undefined,
   // Render sets RENDER_EXTERNAL_URL to the site's public address.
   baseUrl: process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || '',

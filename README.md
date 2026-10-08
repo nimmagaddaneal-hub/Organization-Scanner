@@ -82,6 +82,15 @@ The site serves several schools. **Each school is separate**: its own administra
 - Other commands: `npm run schools -- list [--codes]`, `npm run schools -- codes <id>` (new codes; the old ones stop working), `npm run schools -- rename <id> "New name"`.
 - This tool uses the database in your `.env`. To add a school to the **live** site, put `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` (from your Render settings) in your local `.env` first, run the command, then remove them again.
 
+## The owner page
+
+For the person who runs the site, not for any school. Set `OWNER_PASSWORD` (12 characters or more) in your settings, then open `/owner`. If it is not set, the page does not exist.
+
+- **Schools:** add a school, see its admin and teacher sign-up codes, make new codes, rename it, set its student email domain. Send the admin code to a school after its demo. (The first school's codes come from your settings.) The command `npm run schools` does the same from a terminal.
+- **Demo requests:** every request from the home page, with Mark contacted and Delete. School administrators never see these.
+- **Find account:** search staff and students by name, email or student ID. Reset a lost password, delete a staff account, or **erase a student**: the account is deleted and the name, ID, email, phone and notes are removed from all of that student's check-outs, which stay as anonymous history.
+- The owner login is separate from every staff and student login, and lasts 8 hours.
+
 ## Staff accounts
 
 There are two kinds of staff account. Both sign up at `/admin/signup` with a name, email, password (10 characters or more) and a sign-up code. **The code decides the school and the role.**
@@ -96,7 +105,8 @@ There are two kinds of staff account. Both sign up at `/admin/signup` with a nam
 - Admins open **People** to see their school's accounts and to **Deactivate** or **Delete** one (after a confirmation page). A deactivated account is logged out at once.
 - Log in at `/admin` with email and password. The login lasts 8 hours. After 8 wrong passwords, logins from that address are blocked for 15 minutes.
 - Click your name in the top bar to open **Settings**: change your name, change your password (asks for the current one), or delete your own account (asks for your password). Deleting an account keeps its items, which become organization items, and keeps all check-out history. The only remaining admin of a school cannot delete their own account.
-- There is no "forgot password" email. An admin deactivates the account and the person signs up again with a different email.
+- **Lost password (no email needed):** an administrator opens **People** and presses **Reset password** next to the person. A temporary password is shown once. Hand it over in person. The person is logged out everywhere, and must choose their own password at the next login. Administrators cannot reset their own password this way (use Settings) or another school's. If an administrator forgets theirs, the owner page can reset it.
+- Changing or resetting a password logs that account out on every other device.
 - Passwords are stored only as salted scrypt hashes.
 
 ## List items and print codes
@@ -127,12 +137,13 @@ To remove an item for good, click **Delete** and confirm. This also deletes the 
 - A student returns an item by being logged in as the person who checked it out. From another phone: log in there, then scan.
 - Check-outs made before this feature have no account. Admins can mark those returned on the dashboard.
 - Student logins last 30 days. After 8 wrong passwords for one account, that account is blocked for 15 minutes. Other students are not affected, so a whole school sharing one network is fine.
-- There is no student "forgot password" email yet.
+- **Lost password (no email needed):** an administrator opens **Students** and presses **Reset password**, which works for students who have borrowed from their school. A student who never borrowed anything can ask the site owner (see **The owner page**). The temporary password works the same way as for staff: shown once, and the student must choose their own at the next login.
+- A student with an item past its return date sees a red **late** badge in the header, a warning on **My items**, and a warning on that item's page.
 - A school can require its own email domain (`SCHOOL_EMAIL_DOMAIN` for the first school, `--domain` when adding another). The check happens at check-out: a student whose email does not match cannot borrow that school's items.
 
 ## Demo requests from other schools
 
-The home page has a **Request a demo** button (top) and a form (bottom). Each request is **emailed to you**, and also saved in the database so nothing is lost if the email fails. **School administrators never see demo requests.** There is no page for them.
+The home page has a **Request a demo** button (top) and a form (bottom). Each request is **emailed to you**, and also saved in the database so nothing is lost if the email fails. You read them on the owner page (`/owner/demos`). **School administrators never see demo requests.**
 
 To get the emails, set these in your settings (all three are in `.env.example`):
 
@@ -148,6 +159,14 @@ Without these settings, requests are still saved, but you are not told. The serv
 ## Home page animation
 
 The "ours" diagram in the Side by side section is drawn in 3D (isometric) on a canvas, and the section **locks in place** while you scroll through it. Scrolling drops three item boxes, a dashboard and a platform onto the ground, and finally the orb, your organization. Each landing sends a ripple across the ground mesh and a pulse ring; boxes hop and ride the waves. Labels and numbered pins appear as things land, and the matching line beside the diagram lights up. Falling follows the scroll position, so scrolling back up lifts everything again. If the visitor's device asks for reduced motion, the finished diagram is shown without animation or locking. The code is in `public/diagram.js`; the orb in the first section is `public/hero.js` and can be dragged.
+
+## Reminders for late items
+
+On the dashboard, every late row has an **Email reminder** button, and the top has **Email everyone late** (everyone is on Bcc, so addresses stay private). They open your own email app with the message already written. Nothing is sent by the site, so no email service is needed.
+
+## Privacy and terms
+
+`/privacy` holds a plain-language privacy and terms page, linked from every page footer and both sign-up forms. It describes what this site actually does. **Have your school or a lawyer read it before you rely on it**, especially the section on students under 13, and change the wording if your own rules differ.
 
 ## How it works for students
 
@@ -264,7 +283,10 @@ Run these by hand after setup or after any change:
 - [ ] Open **Settings** (click your name): change the name, change the password (wrong current password is refused), log in with the new password.
 - [ ] Delete your own teacher account in Settings: you are logged out, your items remain as organization items. The only admin is refused.
 - [ ] As admin, open **People**, **Delete** a teacher account after the confirmation page.
-- [ ] As admin, open **Students**: the student who borrowed shows with their check-out counts.
+- [ ] As admin, open **Students**: the student who borrowed shows with their check-out counts. Press **Reset password**: a temporary password appears once; the student's old login stops working, and the new password leads straight to a "choose a new password" page.
+- [ ] On the dashboard, make an item late (set an old return date). **Email reminder** opens your mail app with the message written. The student sees a **late** badge and a warning.
+- [ ] Open `/privacy` from the footer and from both sign-up forms.
+- [ ] With `OWNER_PASSWORD` set, log in at `/owner`: add a school, read the demo request, find a student, reset their password, and erase them.
 - [ ] On the home page, send a demo request. It arrives in your own inbox. It is not visible anywhere in the admin pages.
 - [ ] Add a second school (`npm run schools -- add`), sign up as its admin: you see none of the first school's items, people or students.
 - [ ] As admin, open **People** and deactivate the teacher. The teacher is logged out and cannot log in.

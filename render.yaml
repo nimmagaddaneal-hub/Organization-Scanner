@@ -27,5 +27,7 @@ services:
         sync: false
       - key: RESEND_API_KEY
         sync: false
+      - key: OWNER_PASSWORD
+        sync: false
       - key: TZ
         sync: false

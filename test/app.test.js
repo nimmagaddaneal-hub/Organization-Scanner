@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { openDb, createItem, createSchool, syncDefaultSchool, DEFAULT_SCHOOL_NAME } from '../src/db.js';
 import { createApp } from '../src/app.js';
 
+const OWNER_PASSWORD = 'test-owner-password-1';
 const ADMIN_CODE = 'test-admin-code';
 const TEACHER_CODE = 'test-teacher-code';
 const ADMIN = { name: 'Test Admin', email: 'admin@example.edu', password: 'test-only-password' };
@@ -92,7 +93,7 @@ before(async () => {
   await createItem(db, { name: 'Test Tripod' });
   [camera, tripod] = (await db.prepare('SELECT * FROM items ORDER BY id').all());
   await syncDefaultSchool(db, { adminCode: ADMIN_CODE, teacherCode: TEACHER_CODE });
-  const app = createApp({ db, sessionSecret: 'test-secret', notifyDemo: (request) => demoNotifier(request) });
+  const app = createApp({ db, sessionSecret: 'test-secret', notifyDemo: (request) => demoNotifier(request), ownerPassword: OWNER_PASSWORD });
   await new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', resolve);
   });
@@ -923,4 +924,131 @@ test('privacy and terms page is public and linked from the sign-up forms', async
   }
   assert.match(await (await request('/student/signup')).text(), /you agree to the <a href="\/privacy">/);
   assert.match(await (await request('/admin/signup')).text(), /you agree to the <a href="\/privacy">/);
+});
+
+async function ownerLogin() {
+  const response = await request('/owner/login', { method: 'POST', form: { password: OWNER_PASSWORD } });
+  assert.equal(response.status, 303);
+  return cookiesFrom(response);
+}
+
+test('the owner page is off without a password, and locked without the login', async () => {
+  // A second copy of the app with no owner password: the owner pages do not exist.
+  const bare = createApp({ db, sessionSecret: 'test-secret' });
+  const bareServer = await new Promise((resolve) => {
+    const started = bare.listen(0, '127.0.0.1', () => resolve(started));
+  });
+  const bareUrl = `http://127.0.0.1:${bareServer.address().port}`;
+  assert.equal((await fetch(`${bareUrl}/owner`, { redirect: 'manual' })).status, 404);
+  assert.equal((await fetch(`${bareUrl}/owner/login`, { redirect: 'manual' })).status, 404);
+  bareServer.close();
+
+  for (const path of ['/owner', '/owner/demos', '/owner/accounts', '/owner/accounts/students/1/erase', '/owner/accounts/staff/1/delete']) {
+    const response = await request(path);
+    assert.equal(response.status, 302, path);
+    assert.equal(response.headers.get('location'), '/owner/login', path);
+  }
+  for (const path of ['/owner/schools', '/owner/schools/1', '/owner/schools/2/codes', '/owner/demos/1/status', '/owner/demos/1/delete',
+    '/owner/accounts/staff/1/reset-password', '/owner/accounts/students/1/reset-password', '/owner/accounts/students/1/erase', '/owner/accounts/staff/1/delete', '/owner/logout']) {
+    assert.equal((await request(path, { method: 'POST', form: {} })).status, 401, path);
+  }
+  assert.equal((await request('/owner/login', { method: 'POST', form: { password: 'wrong-owner-password' } })).status, 401);
+
+  // Staff and student logins are not owner logins, and the owner login is not a staff login.
+  const adminCookie = await adminLogin();
+  assert.equal((await request('/owner', { cookie: adminCookie })).status, 302);
+  assert.equal((await request('/owner', { cookie: adminCookie.replace('admin_session', 'owner_session') })).status, 302);
+  const ownerCookie = await ownerLogin();
+  assert.equal((await request('/owner', { cookie: ownerCookie })).status, 200);
+  assert.equal((await request('/admin', { cookie: ownerCookie })).status, 302);
+});
+
+test('owner: add a school, new codes, rename, read and clear demo requests', async () => {
+  const ownerCookie = await ownerLogin();
+  const add = await request('/owner/schools', { method: 'POST', cookie: ownerCookie, form: { name: 'Owner Made Academy', email_domain: '@made.edu' } });
+  assert.equal(add.status, 303);
+  const school = await db.prepare("SELECT * FROM schools WHERE name = 'Owner Made Academy'").get();
+  assert.equal(school.email_domain, 'made.edu');
+  assert.ok(school.admin_code && school.teacher_code);
+  const page = await (await request('/owner', { cookie: ownerCookie })).text();
+  assert.match(page, new RegExp(school.admin_code));
+  assert.match(page, new RegExp(DEFAULT_SCHOOL_NAME));
+
+  // New codes replace the old ones; the first school's codes are not touched here.
+  await request(`/owner/schools/${school.id}/codes`, { method: 'POST', cookie: ownerCookie });
+  const fresh = await db.prepare('SELECT * FROM schools WHERE id = ?').get(school.id);
+  assert.notEqual(fresh.admin_code, school.admin_code);
+  assert.equal((await signUp({ name: 'Old Code', email: 'oldcode@made.edu', password: 'long-enough-password' }, school.admin_code)).status, 400);
+  assert.equal((await signUp({ name: 'New Code', email: 'newcode@made.edu', password: 'long-enough-password' }, fresh.admin_code)).status, 303);
+  const firstBefore = await db.prepare('SELECT admin_code FROM schools WHERE id = 1').get();
+  await request('/owner/schools/1/codes', { method: 'POST', cookie: ownerCookie });
+  assert.equal((await db.prepare('SELECT admin_code FROM schools WHERE id = 1').get()).admin_code, firstBefore.admin_code);
+
+  await request(`/owner/schools/${school.id}`, { method: 'POST', cookie: ownerCookie, form: { name: 'Renamed Academy', email_domain: 'renamed.edu' } });
+  assert.deepEqual(
+    { ...(await db.prepare('SELECT name, email_domain FROM schools WHERE id = ?').get(school.id)) },
+    { name: 'Renamed Academy', email_domain: 'renamed.edu' }
+  );
+
+  // Demo requests: only the owner reads them.
+  await db.prepare('DELETE FROM demo_requests').run();
+  // (The public form is rate limited per address and has used its allowance in an earlier test.)
+  await db
+    .prepare('INSERT INTO demo_requests (name, email, school, role, message, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('Dee', 'dee@elsewhere.org', 'Elsewhere <i>High</i>', '', 'hi', new Date().toISOString());
+  const demos = await (await request('/owner/demos', { cookie: ownerCookie })).text();
+  assert.match(demos, /Elsewhere &lt;i&gt;High&lt;\/i&gt;/);
+  const demoId = (await db.prepare('SELECT id FROM demo_requests').get()).id;
+  await request(`/owner/demos/${demoId}/status`, { method: 'POST', cookie: ownerCookie, form: { status: 'contacted' } });
+  assert.equal((await db.prepare('SELECT status FROM demo_requests WHERE id = ?').get(demoId)).status, 'contacted');
+  assert.doesNotMatch(await (await request('/admin/people', { cookie: await adminLogin() })).text(), /Elsewhere/);
+  await request(`/owner/demos/${demoId}/delete`, { method: 'POST', cookie: ownerCookie });
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests').get()).n, 0);
+});
+
+test('owner: help with lost passwords, erase a student, delete a staff account', async () => {
+  const ownerCookie = await ownerLogin();
+
+  // A student who never borrowed anything is invisible to schools but the owner can help them.
+  const loner = await studentSignup({ name: 'Lost Student', student_id: '4040' });
+  const found = await (await request(`/owner/accounts?q=${encodeURIComponent(loner.account.email)}`, { cookie: ownerCookie })).text();
+  assert.match(found, /Lost Student/);
+  const lonerId = (await db.prepare('SELECT id FROM students WHERE email = ?').get(loner.account.email)).id;
+  const reset = await request(`/owner/accounts/students/${lonerId}/reset-password`, { method: 'POST', cookie: ownerCookie });
+  const temporary = (await reset.text()).match(/<code>([A-Za-z0-9]{12})<\/code>/)[1];
+  assert.equal((await request('/account', { cookie: loner.cookie })).status, 302);
+  const tempCookie = cookiesFrom(await request('/student/login', { method: 'POST', form: { email: loner.account.email, password: temporary } }));
+  assert.equal((await request('/account', { cookie: tempCookie })).headers.get('location'), '/student/new-password');
+
+  // Erasing a student removes their details from every check-out.
+  const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Erase Test Lamp' }));
+  const { account, cookie } = await studentSignup({ name: 'Erase Me', student_id: '5959', email: 'erase.me@example.edu' });
+  await request(`/i/${lamp.code}/checkout`, { method: 'POST', cookie, form: { due_date: tomorrow(), phone: '555-123-4567', purpose: 'my private note' } });
+  const studentId = (await db.prepare('SELECT id FROM students WHERE email = ?').get(account.email)).id;
+  assert.match(await (await request(`/owner/accounts/students/${studentId}/erase`, { cookie: ownerCookie })).text(), /cannot be undone/);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM students WHERE id = ?').get(studentId)).n, 1);
+  assert.equal((await request(`/owner/accounts/students/${studentId}/erase`, { method: 'POST', cookie: ownerCookie })).status, 303);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM students WHERE id = ?').get(studentId)).n, 0);
+  const left = await db.prepare('SELECT * FROM checkouts WHERE item_id = ?').get(lamp.id);
+  assert.equal(left.student_name, '(erased)');
+  for (const field of ['student_id', 'email', 'phone', 'purpose']) assert.equal(left[field], '', field);
+  assert.equal(left.student_account_id, null);
+  const adminCookie = await adminLogin();
+  assert.doesNotMatch(await (await request('/admin/history', { cookie: adminCookie })).text(), /Erase Me|erase\.me|5959|my private note/);
+  assert.equal((await request('/student/login', { method: 'POST', form: { email: account.email, password: account.password } })).status, 401);
+  await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), lamp.id);
+
+  // Staff: reset a password, then delete the account (their items stay with the school).
+  const teacher = { name: 'Owner Helped', email: 'owner.helped@example.edu', password: 'long-enough-password' };
+  const teacherCookie = cookiesFrom(await signUp(teacher, TEACHER_CODE));
+  await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Owner Helped Item' } });
+  const teacherId = (await db.prepare('SELECT id FROM users WHERE email = ?').get(teacher.email)).id;
+  const staffReset = await request(`/owner/accounts/staff/${teacherId}/reset-password`, { method: 'POST', cookie: ownerCookie });
+  assert.match(await staffReset.text(), /<code>[A-Za-z0-9]{12}<\/code>/);
+  assert.equal((await request('/admin', { cookie: teacherCookie })).status, 302);
+  assert.equal((await request(`/owner/accounts/staff/${teacherId}/delete`, { method: 'POST', cookie: ownerCookie })).status, 303);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE id = ?').get(teacherId)).n, 0);
+  const item = await db.prepare("SELECT owner_id, school_id FROM items WHERE name = 'Owner Helped Item'").get();
+  assert.equal(item.owner_id, null);
+  assert.equal(item.school_id, 1);
 });

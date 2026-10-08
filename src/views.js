@@ -29,7 +29,13 @@ const STAFF_LINKS = [
   ['people', '/admin/people', 'People', 'admin'],
 ];
 
-function layout({ title, body, user = null, student = null, active = '', wide = false, landing = false }) {
+const OWNER_LINKS = [
+  ['schools', '/owner', 'Schools'],
+  ['demos', '/owner/demos', 'Demo requests'],
+  ['accounts', '/owner/accounts', 'Find account'],
+];
+
+function layout({ title, body, user = null, student = null, owner = false, active = '', wide = false, landing = false }) {
   const current = (key) => (active === key ? ' aria-current="page"' : '');
   const links = STAFF_LINKS.filter(([, , , role]) => !role || role === user?.role)
     .map(([key, href, label]) => `<a href="${href}"${current(key)}>${label}</a>`)
@@ -43,9 +49,16 @@ function layout({ title, body, user = null, student = null, active = '', wide = 
     : '<a class="button secondary small" href="/student/login">Log in</a>';
   const header = `<header class="site-header no-print">
   <div class="header-inner">
-    <a class="brand" href="${user ? '/admin' : '/'}"><img src="/logo.svg" alt="" width="28" height="28"><span>Item Check-out</span></a>
+    <a class="brand" href="${owner ? '/owner' : user ? '/admin' : '/'}"><img src="/logo.svg" alt="" width="28" height="28"><span>Item Check-out</span></a>
     ${
-      user
+      owner
+        ? `<nav class="nav-links" aria-label="Owner">${OWNER_LINKS.map(([key, href, label]) => `<a href="${href}"${current(key)}>${label}</a>`).join('')}</nav>
+    <div class="nav-user">
+      <span class="role-tag">owner</span>
+      <form method="post" action="/owner/logout"><button class="link-button">Log out</button></form>
+      ${themeButton}
+    </div>`
+        : user
         ? `<nav class="nav-links" aria-label="Staff">${links}</nav>
     <div class="nav-user">
       <a class="who" href="/admin/settings"${current('settings')}>${esc(user.name)}<span class="role-tag">${esc(user.role)}</span></a>
@@ -1037,10 +1050,11 @@ ${students
 
 // ---------- Password reset (no email) ----------
 
-export function tempPasswordPage({ user, person, temporary, back, backLabel }) {
+export function tempPasswordPage({ user = null, owner = false, person, temporary, back, backLabel }) {
   return layout({
     title: 'Temporary password',
     user,
+    owner,
     wide: false,
     body: `<h1>Temporary password</h1>
 <div class="card">
@@ -1154,5 +1168,181 @@ export function privacyPage({ student = null, user = null } = {}) {
   <h2>Questions</h2>
   <p>Ask your school's administrator. Schools that want to use the service can <a href="/#demo">request a demo</a>.</p>
 </section>`,
+  });
+}
+
+// ---------- Owner ----------
+
+export function ownerLoginPage({ error } = {}) {
+  return layout({
+    title: 'Owner login',
+    body: `<h1>Owner login</h1>
+<p class="page-sub">For the person who runs the site.</p>
+${error ? `<div class="alert error" role="alert">${esc(error)}</div>` : ''}
+<form method="post" action="/owner/login" class="card">
+  <label>Password
+    <input type="password" name="password" autocomplete="current-password" required autofocus>
+  </label>
+  <button class="primary">Log in</button>
+</form>`,
+  });
+}
+
+export function ownerSchoolsPage({ schools, newDemos, defaultId, notice = '' }) {
+  const notices = { added: 'School added. Its sign-up codes are in the table.', updated: 'Saved.', codes: 'New sign-up codes made. The old ones no longer work.' };
+  return layout({
+    title: 'Schools',
+    owner: true,
+    active: 'schools',
+    wide: true,
+    body: `<div class="page-head"><div><h1>Schools</h1><p class="page-sub">Each school has its own administrators, teachers, items and students. Send a school its admin code after a demo.</p></div></div>
+${newDemos ? `<div class="alert info"><strong>${newDemos} new demo request${newDemos === 1 ? '' : 's'}.</strong> <a href="/owner/demos">Read them</a>.</div>` : ''}
+${notices[notice] ? `<div class="alert success" role="status">${notices[notice]}</div>` : ''}
+<form method="post" action="/owner/schools" class="card inline-form">
+  <h2>Add a school</h2>
+  <label>School name <span class="required">*</span>
+    <input type="text" name="name" maxlength="120" required>
+  </label>
+  <label>Student email domain <span class="muted">(optional, example: myschool.edu)</span>
+    <input type="text" name="email_domain" maxlength="100">
+  </label>
+  <button class="primary">Add school</button>
+</form>
+<div class="table-wrap"><table>
+<thead><tr><th>School</th><th>Staff</th><th>Items</th><th>Out now</th><th>Admin code</th><th>Teacher code</th><th></th></tr></thead>
+<tbody>
+${schools
+  .map(
+    (school) => `<tr>
+  <td>
+    <form method="post" action="/owner/schools/${school.id}" class="stack-form">
+      <input type="text" name="name" value="${esc(school.name)}" maxlength="120" aria-label="School name" required>
+      ${
+        school.id === defaultId
+          ? `<span class="muted small">Email domain: ${school.email_domain ? '@' + esc(school.email_domain) : 'any'} (set in your settings)</span>`
+          : `<input type="text" name="email_domain" value="${esc(school.email_domain)}" maxlength="100" placeholder="email domain" aria-label="Student email domain">`
+      }
+      <button class="secondary small">Save</button>
+    </form>
+  </td>
+  <td>${school.staff}</td>
+  <td>${school.items}</td>
+  <td>${school.open}</td>
+  <td>${school.admin_code ? `<code>${esc(school.admin_code)}</code>` : '<span class="muted">closed</span>'}</td>
+  <td>${school.teacher_code ? `<code>${esc(school.teacher_code)}</code>` : '<span class="muted">closed</span>'}</td>
+  <td>${
+    school.id === defaultId
+      ? '<span class="muted small">Codes come from your settings</span>'
+      : `<form method="post" action="/owner/schools/${school.id}/codes"><button class="secondary small">New codes</button></form>`
+  }</td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`,
+  });
+}
+
+export function ownerDemosPage({ requests }) {
+  return layout({
+    title: 'Demo requests',
+    owner: true,
+    active: 'demos',
+    wide: true,
+    body: `<div class="page-head"><div><h1>Demo requests</h1><p class="page-sub">Schools that asked for a demo. They are also emailed to you when email is set up.</p></div></div>
+${
+  requests.length
+    ? `<div class="table-wrap"><table>
+<thead><tr><th>Received</th><th>School</th><th>Contact</th><th>Role</th><th>Message</th><th>Status</th><th></th></tr></thead>
+<tbody>
+${requests
+  .map(
+    (row) => `<tr>
+  <td>${esc(formatDateTime(row.created_at))}</td>
+  <td>${esc(row.school)}</td>
+  <td>${esc(row.name)}<div class="small"><a href="mailto:${esc(row.email)}">${esc(row.email)}</a></div></td>
+  <td>${esc(row.role)}</td>
+  <td>${esc(row.message)}</td>
+  <td>${row.status === 'new' ? '<span class="badge overdue-soft">New</span>' : '<span class="badge returned">Contacted</span>'}</td>
+  <td><div class="row-actions">
+    <form method="post" action="/owner/demos/${row.id}/status">
+      <input type="hidden" name="status" value="${row.status === 'new' ? 'contacted' : 'new'}">
+      <button class="secondary small">${row.status === 'new' ? 'Mark contacted' : 'Mark new'}</button>
+    </form>
+    <form method="post" action="/owner/demos/${row.id}/delete"><button class="link-button danger-link">Delete</button></form>
+  </div></td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+    : '<p class="card empty">No demo requests yet.</p>'
+}`,
+  });
+}
+
+export function ownerAccountsPage({ q, staff, students, notice = '' }) {
+  const notices = { erased: 'Student erased.', deleted: 'Account deleted.' };
+  return layout({
+    title: 'Find account',
+    owner: true,
+    active: 'accounts',
+    wide: true,
+    body: `<div class="page-head"><div><h1>Find account</h1><p class="page-sub">Search staff and students by name, email or student ID. Reset a lost password (no email needed) or erase an account.</p></div></div>
+${notices[notice] ? `<div class="alert success" role="status">${notices[notice]}</div>` : ''}
+<form method="get" action="/owner/accounts" class="filters">
+  <input type="search" name="q" value="${esc(q)}" placeholder="Name, email or student ID" aria-label="Search" autofocus>
+  <button class="secondary">Search</button>
+</form>
+${q && !staff.length && !students.length ? '<p class="card empty">No account matches.</p>' : ''}
+${
+  staff.length
+    ? `<h2>Staff</h2><div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Email</th><th>School</th><th>Role</th><th></th></tr></thead>
+<tbody>
+${staff
+  .map(
+    (row) => `<tr class="${row.active ? '' : 'row-retired'}">
+  <td>${esc(row.name)}</td><td>${esc(row.email)}</td><td>${esc(row.school_name)}</td><td>${esc(row.role)}</td>
+  <td><div class="row-actions">
+    <form method="post" action="/owner/accounts/staff/${row.id}/reset-password"><button class="secondary small">Reset password</button></form>
+    <a class="danger-link small" href="/owner/accounts/staff/${row.id}/delete">Delete</a>
+  </div></td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+    : ''
+}
+${
+  students.length
+    ? `<h2>Students</h2><div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Student ID</th><th>Email</th><th></th></tr></thead>
+<tbody>
+${students
+  .map(
+    (row) => `<tr class="${row.active ? '' : 'row-retired'}">
+  <td>${esc(row.name)}</td><td>${esc(row.student_id)}</td><td>${esc(row.email)}</td>
+  <td><div class="row-actions">
+    <form method="post" action="/owner/accounts/students/${row.id}/reset-password"><button class="secondary small">Reset password</button></form>
+    <a class="danger-link small" href="/owner/accounts/students/${row.id}/erase">Erase</a>
+  </div></td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+    : ''
+}`,
+  });
+}
+
+export function ownerConfirmPage({ title, message, action, button }) {
+  return layout({
+    title,
+    owner: true,
+    body: `<h1>${esc(title)}</h1>
+<div class="card">
+  <div class="alert error" role="alert"><strong>This cannot be undone.</strong> ${esc(message)}</div>
+  <form method="post" action="${esc(action)}"><button class="danger block">${esc(button)}</button></form>
+  <p><a href="/owner/accounts">Cancel</a></p>
+</div>`,
   });
 }

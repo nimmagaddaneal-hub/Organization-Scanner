@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import bwipjs from 'bwip-js';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { createItem } from './db.js';
+import { createItem, createSchool, newSignupCode, DEFAULT_SCHOOL_ID } from './db.js';
 import {
   ADMIN_COOKIE,
   parseCookies,
@@ -51,6 +51,7 @@ export function createApp({
   db,
   sessionSecret,
   notifyDemo = async () => {},
+  ownerPassword = '',
   baseUrl = '',
   trustProxy = false,
 }) {
@@ -62,6 +63,7 @@ export function createApp({
 
   const loginLimiter = createRateLimiter(8, 15 * 60 * 1000);
   const demoLimiter = createRateLimiter(5, 60 * 60 * 1000);
+  const ownerLimiter = createRateLimiter(6, 15 * 60 * 1000);
   // A whole school can share one network address, so student limits are per account, and the per-address limits are loose.
   const studentEmailLimiter = createRateLimiter(8, 15 * 60 * 1000);
   const studentIpLimiter = createRateLimiter(200, 15 * 60 * 1000);
@@ -947,6 +949,194 @@ export function createApp({
       .run(req.body?.active === '1' ? 1 : 0, personId, req.user.school_id);
     res.redirect(303, '/admin/people');
   });
+
+  // ---------- Owner: schools, demo requests, accounts ----------
+  // For the person who runs the site. Not tied to any school. Off unless OWNER_PASSWORD is set.
+
+  const OWNER_COOKIE = 'owner_session';
+  const ownerSecret = `${sessionSecret}:owner`;
+  const owner = express.Router();
+
+  owner.use(async (req, res, next) => {
+    if (!ownerPassword) return res.status(404).send(views.messagePage({ title: 'Page not found', message: 'This page does not exist.', status: 'warning' }));
+    req.isOwner = Boolean(readSession(req.cookies[OWNER_COOKIE], ownerSecret));
+    next();
+  });
+
+  owner.get('/login', async (req, res) => {
+    if (req.isOwner) return res.redirect('/owner');
+    res.send(views.ownerLoginPage());
+  });
+
+  owner.post('/login', async (req, res) => {
+    if (ownerLimiter.isBlocked(req.ip)) {
+      return res.status(429).send(views.ownerLoginPage({ error: 'Too many attempts. Try again in 15 minutes.' }));
+    }
+    if (!safeEqual(req.body?.password ?? '', ownerPassword)) {
+      ownerLimiter.recordFailure(req.ip);
+      return res.status(401).send(views.ownerLoginPage({ error: 'Wrong password.' }));
+    }
+    ownerLimiter.clear(req.ip);
+    res.cookie(
+      OWNER_COOKIE,
+      createSessionValue(1, ownerSecret),
+      cookieOptions(req, { sameSite: 'strict', path: '/owner', maxAge: sessionMaxAgeMs })
+    );
+    res.redirect(303, '/owner');
+  });
+
+  // Everything below needs the owner login.
+  owner.use(async (req, res, next) => {
+    if (req.isOwner) return next();
+    if (req.method === 'GET') return res.redirect('/owner/login');
+    res.status(401).type('text').send('Log in first.');
+  });
+
+  owner.post('/logout', async (req, res) => {
+    res.clearCookie(OWNER_COOKIE, cookieOptions(req, { sameSite: 'strict', path: '/owner' }));
+    res.redirect(303, '/owner/login');
+  });
+
+  owner.get('/', async (req, res) => {
+    const schools = await db
+      .prepare(
+        `SELECT s.*,
+                (SELECT COUNT(*) FROM users u WHERE u.school_id = s.id) AS staff,
+                (SELECT COUNT(*) FROM items i WHERE i.school_id = s.id) AS items,
+                (SELECT COUNT(*) FROM checkouts c JOIN items i ON i.id = c.item_id WHERE i.school_id = s.id AND c.returned_at IS NULL) AS open
+           FROM schools s ORDER BY s.id`
+      )
+      .all();
+    const { count } = await db.prepare("SELECT COUNT(*) AS count FROM demo_requests WHERE status = 'new'").get();
+    res.send(views.ownerSchoolsPage({ schools, newDemos: count, defaultId: DEFAULT_SCHOOL_ID, notice: text(req.query.saved, 20) }));
+  });
+
+  owner.post('/schools', async (req, res) => {
+    const name = text(req.body?.name, 120);
+    const domain = text(req.body?.email_domain, 100).toLowerCase().replace(/^@/, '');
+    if (!name) return res.redirect(303, '/owner');
+    await createSchool(db, { name, emailDomain: domain || null });
+    res.redirect(303, '/owner?saved=added');
+  });
+
+  owner.post('/schools/:id', async (req, res) => {
+    const id = Number(req.params.id);
+    const name = text(req.body?.name, 120);
+    if (!name) return res.redirect(303, '/owner');
+    await db.prepare('UPDATE schools SET name = ? WHERE id = ?').run(name, id);
+    // The first school's email domain comes from SCHOOL_EMAIL_DOMAIN in the settings.
+    if (id !== DEFAULT_SCHOOL_ID) {
+      const domain = text(req.body?.email_domain, 100).toLowerCase().replace(/^@/, '');
+      await db.prepare('UPDATE schools SET email_domain = ? WHERE id = ?').run(domain || null, id);
+    }
+    res.redirect(303, '/owner?saved=updated');
+  });
+
+  // New sign-up codes: the old ones stop working. The first school's codes come from the settings.
+  owner.post('/schools/:id/codes', async (req, res) => {
+    const id = Number(req.params.id);
+    if (id === DEFAULT_SCHOOL_ID) return res.redirect(303, '/owner');
+    await db.prepare('UPDATE schools SET admin_code = ?, teacher_code = ? WHERE id = ?').run(newSignupCode(), newSignupCode(), id);
+    res.redirect(303, '/owner?saved=codes');
+  });
+
+  owner.get('/demos', async (req, res) => {
+    const requests = await db.prepare("SELECT * FROM demo_requests ORDER BY status = 'contacted', created_at DESC").all();
+    res.send(views.ownerDemosPage({ requests }));
+  });
+
+  owner.post('/demos/:id/status', async (req, res) => {
+    const status = req.body?.status === 'contacted' ? 'contacted' : 'new';
+    await db.prepare('UPDATE demo_requests SET status = ? WHERE id = ?').run(status, Number(req.params.id));
+    res.redirect(303, '/owner/demos');
+  });
+
+  owner.post('/demos/:id/delete', async (req, res) => {
+    await db.prepare('DELETE FROM demo_requests WHERE id = ?').run(Number(req.params.id));
+    res.redirect(303, '/owner/demos');
+  });
+
+  // Find any staff or student account, to reset a password or erase it.
+  owner.get('/accounts', async (req, res) => {
+    const q = text(req.query.q, 100);
+    let staff = [];
+    let students = [];
+    if (q) {
+      const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+      staff = await db
+        .prepare(
+          `SELECT u.id, u.name, u.email, u.role, u.active, s.name AS school_name
+             FROM users u JOIN schools s ON s.id = u.school_id
+            WHERE u.email LIKE ? ESCAPE '\\' OR u.name LIKE ? ESCAPE '\\' ORDER BY u.name COLLATE NOCASE LIMIT 50`
+        )
+        .all(like, like);
+      students = await db
+        .prepare(
+          `SELECT id, name, student_id, email, active FROM students
+            WHERE email LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR student_id LIKE ? ESCAPE '\\' ORDER BY name COLLATE NOCASE LIMIT 50`
+        )
+        .all(like, like, like);
+    }
+    res.send(views.ownerAccountsPage({ q, staff, students, notice: text(req.query.saved, 20) }));
+  });
+
+  owner.post('/accounts/staff/:id/reset-password', async (req, res) => {
+    const person = await db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(Number(req.params.id));
+    if (!person) return res.status(404).type('text').send('Account not found');
+    const temporary = temporaryPassword();
+    await db.prepare('UPDATE users SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(temporary), person.id);
+    res.send(views.tempPasswordPage({ owner: true, person, temporary, back: '/owner/accounts', backLabel: 'accounts' }));
+  });
+
+  owner.post('/accounts/students/:id/reset-password', async (req, res) => {
+    const person = await db.prepare('SELECT id, name, email FROM students WHERE id = ?').get(Number(req.params.id));
+    if (!person) return res.status(404).type('text').send('Student not found');
+    const temporary = temporaryPassword();
+    await db.prepare('UPDATE students SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(temporary), person.id);
+    res.send(views.tempPasswordPage({ owner: true, person, temporary, back: '/owner/accounts', backLabel: 'accounts' }));
+  });
+
+  owner.get('/accounts/students/:id/erase', async (req, res) => {
+    const person = await db.prepare('SELECT id, name, email FROM students WHERE id = ?').get(Number(req.params.id));
+    if (!person) return res.status(404).type('text').send('Student not found');
+    res.send(
+      views.ownerConfirmPage({
+        title: `Erase ${person.name}`,
+        message: `Erases the account (${person.email}) and removes the name, ID, email, phone and notes from every check-out they made. The check-outs stay as anonymous history. This cannot be undone.`,
+        action: `/owner/accounts/students/${person.id}/erase`,
+        button: 'Erase student for good',
+      })
+    );
+  });
+
+  owner.post('/accounts/students/:id/erase', async (req, res) => {
+    const id = Number(req.params.id);
+    await db
+      .prepare("UPDATE checkouts SET student_name = '(erased)', student_id = '', email = '', phone = '', purpose = '', student_account_id = NULL WHERE student_account_id = ?")
+      .run(id);
+    await db.prepare('DELETE FROM students WHERE id = ?').run(id);
+    res.redirect(303, '/owner/accounts?saved=erased');
+  });
+
+  owner.get('/accounts/staff/:id/delete', async (req, res) => {
+    const person = await db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(Number(req.params.id));
+    if (!person) return res.status(404).type('text').send('Account not found');
+    res.send(
+      views.ownerConfirmPage({
+        title: `Delete ${person.name}`,
+        message: `Deletes the staff account (${person.email}). Their items stay with their school as organization items, and check-out history is kept. This cannot be undone.`,
+        action: `/owner/accounts/staff/${person.id}/delete`,
+        button: 'Delete account for good',
+      })
+    );
+  });
+
+  owner.post('/accounts/staff/:id/delete', async (req, res) => {
+    await removeAccount(Number(req.params.id));
+    res.redirect(303, '/owner/accounts?saved=deleted');
+  });
+
+  app.use('/owner', owner);
 
   app.use('/admin', admin);
 
