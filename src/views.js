@@ -37,7 +37,8 @@ function layout({ title, body, user = null, student = null, active = '', wide = 
   const themeButton =
     '<button type="button" class="icon-button" data-theme-toggle aria-label="Switch between light and dark theme" title="Light / dark">&#9680;</button>';
   const studentMenu = student
-    ? `<a class="who" href="/account">${esc(student.name)}</a>
+    ? `${student.overdue ? `<a class="late-badge" href="/account" title="Items past their return date">${student.overdue} late</a>` : ''}
+      <a class="who" href="/account">${esc(student.name)}</a>
       <form method="post" action="/student/logout"><button class="link-button">Log out</button></form>`
     : '<a class="button secondary small" href="/student/login">Log in</a>';
   const header = `<header class="site-header no-print">
@@ -418,8 +419,11 @@ ${errorList(errors)}
 }
 
 // Shown to the student who holds the item.
-export function ownCheckoutPage({ item, student, checkout, justCheckedOut }) {
-  const heading = justCheckedOut
+export function ownCheckoutPage({ item, student, checkout, justCheckedOut, today }) {
+  const late = !justCheckedOut && today && checkout.due_date < today;
+  const heading = late
+    ? `<div class="alert error" role="alert"><strong>This is late.</strong> It was due ${esc(formatDate(checkout.due_date))}. Please return it as soon as you can.</div>`
+    : justCheckedOut
     ? `<div class="alert success" role="status"><strong>You're all set!</strong> Your check-out is recorded.</div>`
     : `<div class="alert info">You have this item checked out.</div>`;
   return layout({
@@ -480,6 +484,11 @@ export function accountPage({ student, open, history, today }) {
     student,
     wide: true,
     body: `<div class="page-head"><div><h1>My items</h1><p class="page-sub">${esc(student.name)} &middot; ID ${esc(student.student_id)} &middot; ${esc(student.email)}</p></div></div>
+${
+  open.some((row) => row.due_date < today)
+    ? `<div class="alert error" role="alert"><strong>${open.filter((row) => row.due_date < today).length} item${open.filter((row) => row.due_date < today).length === 1 ? ' is' : 's are'} late.</strong> Please return ${open.filter((row) => row.due_date < today).length === 1 ? 'it' : 'them'} as soon as you can. Scan the code again, or press Return below.</div>`
+    : ''
+}
 <h2>Checked out now</h2>
 ${
   open.length
@@ -597,6 +606,7 @@ ${people
           <input type="hidden" name="active" value="${person.active ? '0' : '1'}">
           <button class="secondary small">${person.active ? 'Deactivate' : 'Reactivate'}</button>
         </form>
+        <form method="post" action="/admin/people/${person.id}/reset-password"><button class="link-button small">Reset password</button></form>
         <a class="danger-link small" href="/admin/people/${person.id}/delete">Delete</a></div>`
   }</td>
 </tr>`
@@ -956,7 +966,7 @@ export function studentsPage({ user, students, q }) {
 ${
   students.length
     ? `<div class="table-wrap"><table>
-<thead><tr><th>Name</th><th>Student ID</th><th>Email</th><th>Out now</th><th>All check-outs</th><th>Last check-out</th></tr></thead>
+<thead><tr><th>Name</th><th>Student ID</th><th>Email</th><th>Out now</th><th>All check-outs</th><th>Last check-out</th><th></th></tr></thead>
 <tbody>
 ${students
   .map(
@@ -967,11 +977,49 @@ ${students
   <td>${row.open}</td>
   <td>${row.total}</td>
   <td>${esc(formatDateTime(row.last_seen))}</td>
+  <td><form method="post" action="/admin/students/${row.id}/reset-password"><button class="link-button small">Reset password</button></form></td>
 </tr>`
   )
   .join('')}
 </tbody></table></div>`
     : `<p class="card empty">${q ? 'No students match this search.' : 'No student has borrowed from this school yet.'}</p>`
 }`,
+  });
+}
+
+// ---------- Password reset (no email) ----------
+
+export function tempPasswordPage({ user, person, temporary, back, backLabel }) {
+  return layout({
+    title: 'Temporary password',
+    user,
+    wide: false,
+    body: `<h1>Temporary password</h1>
+<div class="card">
+  <p>New password for <strong>${esc(person.name)}</strong> (${esc(person.email)}):</p>
+  <p class="temp-password"><code>${esc(temporary)}</code></p>
+  <div class="alert warning" role="alert"><strong>This is shown only once.</strong> Give it to ${esc(person.name)} in person or by a message only they can read. Every device they were logged in on is logged out, and they must choose their own password at the next login.</div>
+  <a class="button secondary" href="${esc(back)}">Back to ${esc(backLabel)}</a>
+</div>`,
+  });
+}
+
+export function newPasswordPage({ user = null, student = null, action, minLength, errors = [] }) {
+  return layout({
+    title: 'Choose a new password',
+    user,
+    student,
+    body: `<h1>Choose a new password</h1>
+<p class="page-sub">You signed in with a temporary password. Choose your own to continue.</p>
+${errorList(errors)}
+<form method="post" action="${esc(action)}" class="card">
+  <label>New password <span class="muted">(${minLength} characters or more)</span>
+    <input type="password" name="password" autocomplete="new-password" minlength="${minLength}" maxlength="200" required autofocus>
+  </label>
+  <label>Confirm new password
+    <input type="password" name="confirm_password" autocomplete="new-password" minlength="${minLength}" maxlength="200" required>
+  </label>
+  <button class="primary">Save password</button>
+</form>`,
   });
 }

@@ -1,4 +1,4 @@
-import { createHmac, createHash, timingSafeEqual, randomBytes, scryptSync } from 'node:crypto';
+import { createHmac, createHash, timingSafeEqual, randomBytes, randomInt, scryptSync } from 'node:crypto';
 
 export const ADMIN_COOKIE = 'admin_session';
 const SESSION_HOURS = 8;
@@ -29,20 +29,34 @@ function sign(payload, secret) {
   return createHmac('sha256', secret).update(payload).digest('base64url');
 }
 
-// The session cookie holds "userId.expiry.signature". Only the server can make a valid signature.
-export function createSessionValue(userId, secret, hours = SESSION_HOURS) {
-  const payload = `${userId}.${Date.now() + hours * 60 * 60 * 1000}`;
+// A short fingerprint of a password hash. A session only works while it matches, so changing or
+// resetting a password logs that account out everywhere else.
+export function passwordVersion(hash) {
+  return createHash('sha256').update(String(hash)).digest('hex').slice(0, 12);
+}
+
+// The session cookie holds "userId.expiry.version.signature". Only the server can make a valid signature.
+export function createSessionValue(userId, secret, hours = SESSION_HOURS, version = '0') {
+  const payload = `${userId}.${Date.now() + hours * 60 * 60 * 1000}.${version}`;
   return `${payload}.${sign(payload, secret)}`;
 }
 
-// Returns the user id from a valid, unexpired session cookie, or null.
+// Returns { id, version } from a valid, unexpired session cookie, or null.
 export function readSession(value, secret) {
   if (!value) return null;
-  const [userId, expiry, signature] = value.split('.');
-  if (!userId || !expiry || !signature) return null;
-  if (!safeEqual(signature, sign(`${userId}.${expiry}`, secret))) return null;
+  const [userId, expiry, version, signature] = value.split('.');
+  if (!userId || !expiry || !version || !signature) return null;
+  if (!safeEqual(signature, sign(`${userId}.${expiry}.${version}`, secret))) return null;
   if (!(Number(expiry) > Date.now())) return null;
-  return Number(userId);
+  return { id: Number(userId), version };
+}
+
+// A temporary password to hand to someone. No look-alike characters (0 O 1 l I).
+const TEMP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+export function temporaryPassword(length = 12) {
+  let out = '';
+  for (let i = 0; i < length; i++) out += TEMP_ALPHABET[randomInt(TEMP_ALPHABET.length)];
+  return out;
 }
 
 // Passwords are stored only as salted scrypt hashes.

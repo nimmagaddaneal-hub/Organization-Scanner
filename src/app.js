@@ -10,6 +10,8 @@ import {
   safeEqual,
   createSessionValue,
   readSession,
+  passwordVersion,
+  temporaryPassword,
   hashPassword,
   verifyPassword,
   sessionMaxAgeMs,
@@ -124,22 +126,40 @@ export function createApp({
 
   // Student cookies are signed with their own secret, so an admin cookie is never accepted as a student one.
   const studentSecret = `${sessionSecret}:student`;
-  const findStudent = db.prepare('SELECT id, name, student_id, email, phone FROM students WHERE id = ? AND active = 1');
+  const findStudent = db.prepare(
+    'SELECT id, name, student_id, email, phone, must_change, password_hash FROM students WHERE id = ? AND active = 1'
+  );
 
   app.use(async (req, res, next) => {
     try {
-      const studentId = readSession(req.cookies[STUDENT_COOKIE], studentSecret);
-      req.student = studentId ? (await findStudent.get(studentId)) ?? null : null;
+      req.student = null;
+      const session = readSession(req.cookies[STUDENT_COOKIE], studentSecret);
+      const row = session ? await findStudent.get(session.id) : null;
+      // The session only works for the password it was made with.
+      if (row && session.version === passwordVersion(row.password_hash)) {
+        const { password_hash: _hash, ...student } = row;
+        // How many items this student has that are past their return date, for the warning in the header.
+        student.overdue = (
+          await db
+            .prepare('SELECT COUNT(*) AS count FROM checkouts WHERE student_account_id = ? AND returned_at IS NULL AND due_date < ?')
+            .get(student.id, todayLocal())
+        ).count;
+        req.student = student;
+      }
+      // A student with a temporary password must choose their own before doing anything else.
+      if (req.student?.must_change && !['/student/new-password', '/student/logout'].includes(req.path)) {
+        return res.redirect(303, '/student/new-password');
+      }
       next();
     } catch (error) {
       next(error);
     }
   });
 
-  const startStudentSession = (req, res, studentId) =>
+  const startStudentSession = (req, res, studentId, passwordHash) =>
     res.cookie(
       STUDENT_COOKIE,
-      createSessionValue(studentId, studentSecret, STUDENT_SESSION_HOURS),
+      createSessionValue(studentId, studentSecret, STUDENT_SESSION_HOURS, passwordVersion(passwordHash)),
       cookieOptions(req, { sameSite: 'lax', path: '/', maxAge: STUDENT_SESSION_HOURS * 60 * 60 * 1000 })
     );
 
@@ -167,7 +187,7 @@ export function createApp({
       return res.status(401).send(views.studentLoginPage({ next, email, error: 'Wrong email or password.' }));
     }
     studentEmailLimiter.clear(email);
-    startStudentSession(req, res, account.id);
+    startStudentSession(req, res, account.id, account.password_hash);
     res.redirect(303, next);
   });
 
@@ -203,18 +223,39 @@ export function createApp({
     if (errors.length) return fail(400, errors);
 
     let studentAccountId;
+    const passwordHash = hashPassword(password);
     try {
       const result = await db
         .prepare('INSERT INTO students (name, student_id, email, phone, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(values.name, values.student_id, values.email, values.phone, hashPassword(password), new Date().toISOString());
+        .run(values.name, values.student_id, values.email, values.phone, passwordHash, new Date().toISOString());
       studentAccountId = result.lastInsertRowid;
     } catch (error) {
       if (String(error.message).includes('UNIQUE')) return fail(400, ['An account with this email already exists. Log in instead.']);
       throw error;
     }
     studentSignupLimiter.recordFailure(req.ip);
-    startStudentSession(req, res, studentAccountId);
+    startStudentSession(req, res, studentAccountId, passwordHash);
     res.redirect(303, next);
+  });
+
+  // Choosing a new password after someone reset it for you.
+  app.get('/student/new-password', async (req, res) => {
+    if (!req.student) return res.redirect('/student/login');
+    res.send(views.newPasswordPage({ student: req.student, action: '/student/new-password', minLength: 8 }));
+  });
+
+  app.post('/student/new-password', async (req, res) => {
+    if (!req.student) return res.redirect(303, '/student/login');
+    const password = String(req.body?.password ?? '');
+    const fail = (errors) =>
+      res.status(400).send(views.newPasswordPage({ student: req.student, action: '/student/new-password', minLength: 8, errors }));
+    if (password.length < 8) return fail(['Choose a password of 8 characters or more.']);
+    if (password.length > 200) return fail(['Choose a password of 200 characters or fewer.']);
+    if (password !== String(req.body?.confirm_password ?? '')) return fail(['The passwords do not match.']);
+    const hash = hashPassword(password);
+    await db.prepare('UPDATE students SET password_hash = ?, must_change = 0 WHERE id = ?').run(hash, req.student.id);
+    startStudentSession(req, res, req.student.id, hash);
+    res.redirect(303, '/account');
   });
 
   app.post('/student/logout', async (req, res) => {
@@ -335,7 +376,7 @@ export function createApp({
       return res.send(formPage(req));
     }
     if (isHolder(req, item, checkout)) {
-      return res.send(views.ownCheckoutPage({ item, student, checkout, justCheckedOut: req.query.done === '1' }));
+      return res.send(views.ownCheckoutPage({ item, student, checkout, justCheckedOut: req.query.done === '1', today: todayLocal() }));
     }
     res.send(views.unavailablePage({ item, student }));
   });
@@ -408,19 +449,23 @@ export function createApp({
   const admin = express.Router();
 
   const findUser = db.prepare(
-    `SELECT u.id, u.name, u.email, u.role, u.active, u.school_id, s.name AS school_name
+    `SELECT u.id, u.name, u.email, u.role, u.active, u.school_id, u.must_change, u.password_hash, s.name AS school_name
        FROM users u JOIN schools s ON s.id = u.school_id
       WHERE u.id = ? AND u.active = 1`
   );
   // The account is looked up on every request, so deactivating someone takes effect at once.
+  // A session only works for the password it was made with.
   const currentUser = async (req) => {
-    const userId = readSession(req.cookies[ADMIN_COOKIE], sessionSecret);
-    return userId ? (await findUser.get(userId)) ?? null : null;
+    const session = readSession(req.cookies[ADMIN_COOKIE], sessionSecret);
+    const row = session ? await findUser.get(session.id) : null;
+    if (!row || session.version !== passwordVersion(row.password_hash)) return null;
+    const { password_hash: _hash, ...user } = row;
+    return user;
   };
-  const startSession = (req, res, userId) =>
+  const startSession = (req, res, userId, passwordHash) =>
     res.cookie(
       ADMIN_COOKIE,
-      createSessionValue(userId, sessionSecret),
+      createSessionValue(userId, sessionSecret, undefined, passwordVersion(passwordHash)),
       cookieOptions(req, { sameSite: 'strict', path: '/admin', maxAge: sessionMaxAgeMs })
     );
   // Checked when the email is unknown, so a wrong email takes as long as a wrong password.
@@ -443,7 +488,7 @@ export function createApp({
       return res.status(401).send(views.loginPage({ email, error: 'Wrong email or password.' }));
     }
     loginLimiter.clear(req.ip);
-    startSession(req, res, account.id);
+    startSession(req, res, account.id, account.password_hash);
     res.redirect(303, '/admin');
   });
 
@@ -479,22 +524,27 @@ export function createApp({
     if (errors.length) return fail(400, errors);
 
     let userId;
+    const passwordHash = hashPassword(password);
     try {
       const result = await db
         .prepare('INSERT INTO users (name, email, password_hash, role, school_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(values.name, values.email, hashPassword(password), role, schoolId, new Date().toISOString());
+        .run(values.name, values.email, passwordHash, role, schoolId, new Date().toISOString());
       userId = result.lastInsertRowid;
     } catch (error) {
       if (String(error.message).includes('UNIQUE')) return fail(400, ['An account with this email already exists. Log in instead.']);
       throw error;
     }
-    startSession(req, res, userId);
+    startSession(req, res, userId, passwordHash);
     res.redirect(303, role === 'admin' ? '/admin' : '/admin/items');
   });
 
   // Everything registered on this router below this line requires a staff login.
   admin.use(async (req, res, next) => {
     req.user = await currentUser(req);
+    // Someone with a temporary password must choose their own before doing anything else.
+    if (req.user?.must_change && !['/settings/new-password', '/logout'].includes(req.path)) {
+      return res.redirect(303, '/admin/settings/new-password');
+    }
     if (req.user) return next();
     if (req.method === 'GET') return res.redirect('/admin/login');
     res.status(401).type('text').send('Log in first.');
@@ -561,8 +611,29 @@ export function createApp({
     if (newPassword !== String(req.body?.confirm_password ?? '')) return fail(400, 'The new passwords do not match.');
 
     accountLimiter.clear(limiterKey);
-    await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), req.user.id);
+    // The new password signs out every other device, so the cookie is issued again here.
+    const newHash = hashPassword(newPassword);
+    await db.prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?').run(newHash, req.user.id);
+    startSession(req, res, req.user.id, newHash);
     res.redirect(303, '/admin/settings?saved=password');
+  });
+
+  // Choosing a new password after someone reset it for you.
+  admin.get('/settings/new-password', async (req, res) => {
+    res.send(views.newPasswordPage({ user: req.user, action: '/admin/settings/new-password', minLength: 10 }));
+  });
+
+  admin.post('/settings/new-password', async (req, res) => {
+    const password = String(req.body?.password ?? '');
+    const fail = (errors) =>
+      res.status(400).send(views.newPasswordPage({ user: req.user, action: '/admin/settings/new-password', minLength: 10, errors }));
+    if (password.length < 10) return fail(['Choose a password of 10 characters or more.']);
+    if (password.length > 200) return fail(['Choose a password of 200 characters or fewer.']);
+    if (password !== String(req.body?.confirm_password ?? '')) return fail(['The passwords do not match.']);
+    const hash = hashPassword(password);
+    await db.prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?').run(hash, req.user.id);
+    startSession(req, res, req.user.id, hash);
+    res.redirect(303, '/admin');
   });
 
   admin.get('/settings/delete', async (req, res) => {
@@ -833,6 +904,36 @@ export function createApp({
     if (!person) return res.status(404).type('text').send('Account not found');
     await removeAccount(person.id);
     res.redirect(303, '/admin/people');
+  });
+
+  // Reset a password without email: a temporary one is shown once, to hand over in person.
+  // The person must choose their own at the next login, and every old login stops working.
+  admin.post('/people/:id/reset-password', requireAdmin, async (req, res) => {
+    const personId = Number(req.params.id);
+    if (personId === req.user.id) return res.redirect(303, '/admin/settings');
+    const person = await db
+      .prepare('SELECT id, name, email FROM users WHERE id = ? AND school_id = ?')
+      .get(personId, req.user.school_id);
+    if (!person) return res.status(404).type('text').send('Account not found');
+    const temporary = temporaryPassword();
+    await db.prepare('UPDATE users SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(temporary), person.id);
+    res.send(views.tempPasswordPage({ user: req.user, person, temporary, back: '/admin/people', backLabel: 'People' }));
+  });
+
+  admin.post('/students/:id/reset-password', requireAdmin, async (req, res) => {
+    // Only for students who have borrowed from this school.
+    const person = await db
+      .prepare(
+        `SELECT s.id, s.name, s.email FROM students s
+          WHERE s.id = ? AND EXISTS (
+            SELECT 1 FROM checkouts c JOIN items i ON i.id = c.item_id
+             WHERE c.student_account_id = s.id AND i.school_id = ?)`
+      )
+      .get(Number(req.params.id), req.user.school_id);
+    if (!person) return res.status(404).type('text').send('Student not found');
+    const temporary = temporaryPassword();
+    await db.prepare('UPDATE students SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(temporary), person.id);
+    res.send(views.tempPasswordPage({ user: req.user, person, temporary, back: '/admin/students', backLabel: 'Students' }));
   });
 
   admin.post('/people/:id/active', requireAdmin, async (req, res) => {

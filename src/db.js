@@ -130,11 +130,20 @@ export async function openDb({ url, authToken }) {
     await client.execute({ sql: `UPDATE ${table} SET school_id = ? WHERE school_id IS NULL`, args: [DEFAULT_SCHOOL_ID] });
   }
 
+  // A temporary password set by someone else must be changed at the next login.
+  for (const table of ['users', 'students']) {
+    const columns = (await db.prepare(`PRAGMA table_info(${table})`).all()).map((column) => column.name);
+    if (!columns.includes('must_change')) {
+      await client.execute(`ALTER TABLE ${table} ADD COLUMN must_change INTEGER NOT NULL DEFAULT 0`);
+    }
+  }
+
   // Check-outs made before student accounts existed have no account.
   const checkoutColumns = (await db.prepare('PRAGMA table_info(checkouts)').all()).map((column) => column.name);
   if (!checkoutColumns.includes('student_account_id')) {
     await client.execute('ALTER TABLE checkouts ADD COLUMN student_account_id INTEGER REFERENCES students(id)');
   }
+  await client.execute('CREATE INDEX IF NOT EXISTS checkouts_by_student ON checkouts(student_account_id)');
   return db;
 }
 

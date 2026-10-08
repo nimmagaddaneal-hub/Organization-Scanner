@@ -519,3 +519,8 @@ dl.codes dd { margin: 0; }
   .dg-live .story-track { height: 300vh; }
   .dg-live .story-stage { top: 150px; }
 }
+
+.temp-password { margin: 8px 0 16px; }
+.temp-password code { font-size: 1.5rem; padding: 8px 14px; letter-spacing: 0.06em; user-select: all; }
+
+.late-badge { padding: 2px 9px; border-radius: 999px; background: var(--error-text); color: #fff; font-size: 0.78rem; font-weight: 700; text-decoration: none; }
