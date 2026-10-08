@@ -742,12 +742,15 @@ test('wrong student passwords lock only that account, not everyone on the same n
   assert.equal((await login(bystander, bystander.password)).status, 303);
 });
 
-test('the home page has the scroll story and its script', async () => {
+test('the home page has the animated diagram and its script, and no separate scroll story', async () => {
   const home = await (await request('/')).text();
-  assert.match(home, /id="system"/);
-  assert.match(home, /id="story-canvas"/);
-  assert.match(home, /<script src="\/story\.js"/);
-  const script = await request('/story.js');
+  assert.match(home, /id="diagram"/);
+  assert.match(home, /id="dg-canvas"/);
+  assert.match(home, /Your organization/);
+  assert.match(home, /<script src="\/diagram\.js"/);
+  assert.doesNotMatch(home, /id="system"|story-canvas|story\.js/);
+  const script = await request('/diagram.js');
   assert.equal(script.status, 200);
-  assert.match(await script.text(), /story-canvas/);
+  assert.match(await script.text(), /dg-canvas/);
+  assert.equal((await request('/story.js')).status, 404);
 });

@@ -1,24 +1,21 @@
-// Scroll story on the home page: as you scroll, items, a dashboard and finally "your organization" drop onto
-// an isometric ground. Each landing sends a pixelated ripple across the tiles.
-// Falling is tied to the scroll position, so scrolling back up lifts everything again.
+// The "ours" diagram on the home page. As it scrolls into view, items, a dashboard and finally
+// "your organization" drop onto an isometric ground. Each landing sends a pixelated ripple across the tiles.
+// Falling follows the scroll position, so scrolling back up lifts everything again.
 (() => {
-  const story = document.getElementById('system');
-  const canvas = document.getElementById('story-canvas');
-  if (!story || !canvas) return;
+  const box = document.getElementById('diagram');
+  const canvas = document.getElementById('dg-canvas');
+  if (!box || !canvas) return;
   const ctx = canvas.getContext('2d');
-  const track = story.querySelector('.story-track');
-  const stage = story.querySelector('.story-stage');
-  const bar = story.querySelector('.story-bar span');
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // The canvas is small and scaled up without smoothing, which gives the chunky pixel look.
   const W = 240;
   const H = 176;
-  const N = 13;
-  const TW = 14;
-  const TH = 7;
+  const N = 14;
+  const TW = 16;
+  const TH = 8;
   const OX = W / 2;
-  const OY = 54;
+  const OY = 46;
   const DROP = 120;
   const FALL = 0.13;
   canvas.width = W;
@@ -26,24 +23,38 @@
 
   // ti: scroll position (0 to 1) where the thing lands. amp: how hard it hits.
   const things = [
-    { kind: 'cube', gx: 3, gy: 3, w: 2, d: 2, h: 9, ti: 0.16, amp: 4 },
-    { kind: 'cube', gx: 9, gy: 3, w: 2, d: 2, h: 9, ti: 0.3, amp: 4 },
-    { kind: 'cube', gx: 3, gy: 9, w: 2, d: 2, h: 9, ti: 0.44, amp: 4 },
-    { kind: 'slab', gx: 8, gy: 8.5, w: 3, d: 2, h: 3, ti: 0.62, amp: 6 },
-    { kind: 'pad', gx: 5, gy: 5, w: 3, d: 3, h: 2, ti: 0.74, amp: 6 },
-    { kind: 'orb', gx: 6.5, gy: 6.5, w: 0, d: 0, h: 0, ti: 0.86, amp: 10 },
+    { id: 'left', kind: 'cube', gx: 2, gy: 10, w: 2, d: 2, h: 10, ti: 0.14, amp: 4 },
+    { id: 'right', kind: 'cube', gx: 10, gy: 2, w: 2, d: 2, h: 10, ti: 0.28, amp: 4 },
+    { id: 'front', kind: 'cube', gx: 8, gy: 12, w: 2, d: 2, h: 10, ti: 0.42, amp: 4 },
+    { id: 'slab', kind: 'slab', gx: 10.5, gy: 8, w: 3, d: 2, h: 3, ti: 0.58, amp: 6 },
+    { id: 'pad', kind: 'pad', gx: 5.5, gy: 5.5, w: 3, d: 3, h: 2, ti: 0.72, amp: 6 },
+    { id: 'orb', kind: 'orb', gx: 7, gy: 7, w: 0, d: 0, h: 0, ti: 0.88, amp: 10 },
   ];
   things.forEach((thing) => {
     thing.landed = false;
   });
+  const byId = Object.fromEntries(things.map((thing) => [thing.id, thing]));
   let ripples = [];
   let shake = { amount: 0, at: 0 };
   let first = true;
   let visible = true;
-  let staticProgress = reduceMotion ? 1 : null;
+  const staticProgress = reduceMotion ? 1 : null;
 
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
   const project = (gx, gy, z) => [Math.round(OX + ((gx - gy) * TW) / 2), Math.round(OY + ((gx + gy) * TH) / 2 - z)];
+
+  // Labels and numbered pins are real text on top of the canvas. Each sits at a spot on the ground
+  // and appears once the thing it belongs to has landed.
+  const tags = [...box.querySelectorAll('[data-after]')].map((el) => ({
+    el,
+    after: byId[el.dataset.after],
+    at: project(Number(el.dataset.gx), Number(el.dataset.gy), Number(el.dataset.z || 0)),
+  }));
+  tags.forEach((tag) => {
+    tag.el.style.left = `${(tag.at[0] / W) * 100}%`;
+    tag.el.style.top = `${(tag.at[1] / H) * 100}%`;
+  });
+  const legend = [...document.querySelectorAll('#compare .callouts li')];
 
   function waveAt(gx, gy, now) {
     let z = 0;
@@ -58,13 +69,12 @@
     return Math.round(z / 2) * 2;
   }
 
+  // 0 when the diagram starts to enter the window, 1 once it is about half way up.
   function progress() {
     if (staticProgress !== null) return staticProgress;
-    const box = track.getBoundingClientRect();
-    const range = box.height - stage.offsetHeight;
-    // The stage sticks this far from the top of the window (it is lower on phones, under the taller header).
-    const stickTop = parseFloat(getComputedStyle(stage).top) || 84;
-    return range > 0 ? clamp((stickTop - box.top) / range, 0, 1) : 0;
+    const top = box.getBoundingClientRect().top;
+    const vh = window.innerHeight;
+    return clamp((vh * 0.92 - top) / (vh * 0.55), 0, 1);
   }
 
   function draw(p, now) {
@@ -99,16 +109,33 @@
       for (let gx = Math.max(0, sum - N + 1); gx <= Math.min(N - 1, sum); gx++) {
         const gy = sum - gx;
         const z = waveAt(gx + 0.5, gy + 0.5, now);
-        const edge = 0.22;
-        face([project(gx, gy + 1, z), project(gx + 1, gy + 1, z), project(gx + 1, gy + 1, -5), project(gx, gy + 1, -5)], 0.16, edge);
-        face([project(gx + 1, gy, z), project(gx + 1, gy + 1, z), project(gx + 1, gy + 1, -5), project(gx + 1, gy, -5)], 0.3, edge);
+        const edge = 0.2;
+        face([project(gx, gy + 1, z), project(gx + 1, gy + 1, z), project(gx + 1, gy + 1, -4), project(gx, gy + 1, -4)], 0.16, edge);
+        face([project(gx + 1, gy, z), project(gx + 1, gy + 1, z), project(gx + 1, gy + 1, -4), project(gx + 1, gy, -4)], 0.3, edge);
         const lift = z > 0 ? 0.06 + 0.5 * clamp(z / 9, 0, 1) : 0.1 + 0.22 * clamp(-z / 9, 0, 1);
         face([project(gx, gy, z), project(gx + 1, gy, z), project(gx + 1, gy + 1, z), project(gx, gy + 1, z)], lift, edge);
       }
     }
 
+    // Dashed links from everything that has landed to the platform, once the platform is down.
+    if (byId.pad.landed) {
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = inkAlpha(0.7);
+      ctx.lineWidth = 1;
+      for (const thing of things) {
+        if (!thing.landed || thing.kind === 'pad' || thing.kind === 'orb') continue;
+        const [x1, y1] = project(thing.gx + thing.w / 2, thing.gy + thing.d / 2, 0);
+        const [x2, y2] = project(7, 7, 0);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+
     // Things, back to front.
-    const box = (gx, gy, w, d, h, base) => {
+    const prism = (gx, gy, w, d, h, base) => {
       face([project(gx, gy + d, base), project(gx + w, gy + d, base), project(gx + w, gy + d, base + h), project(gx, gy + d, base + h)], 0.14, 0.85);
       face([project(gx + w, gy, base), project(gx + w, gy + d, base), project(gx + w, gy + d, base + h), project(gx + w, gy, base + h)], 0.32, 0.85);
       face([project(gx, gy, base + h), project(gx + w, gy, base + h), project(gx + w, gy + d, base + h), project(gx, gy + d, base + h)], 0, 0.85);
@@ -129,7 +156,7 @@
       if (p <= start) continue;
       const u = clamp((p - start) / FALL, 0, 1);
       const lift = DROP * (1 - u * u);
-      const ground = thing.kind === 'orb' ? waveAt(6, 6, now) : waveAt(thing.gx + thing.w / 2, thing.gy + thing.d / 2, now);
+      const ground = thing.kind === 'orb' ? waveAt(7, 7, now) : waveAt(thing.gx + thing.w / 2, thing.gy + thing.d / 2, now);
       const base = (thing.landed ? 0 : lift) + ground;
 
       // Shadow on the ground, tighter as the thing comes down.
@@ -140,14 +167,14 @@
       }
 
       if (thing.kind === 'cube') {
-        box(thing.gx, thing.gy, thing.w, thing.d, thing.h, base);
+        prism(thing.gx, thing.gy, thing.w, thing.d, thing.h, base);
         const top = base + thing.h;
         square(thing.gx + 0.3, thing.gy + 0.3, 0.55, top, 0.9);
         square(thing.gx + 1.15, thing.gy + 0.3, 0.55, top, 0.9);
         square(thing.gx + 0.3, thing.gy + 1.15, 0.55, top, 0.9);
         square(thing.gx + 1.2, thing.gy + 1.2, 0.3, top, 0.9);
       } else if (thing.kind === 'slab') {
-        box(thing.gx, thing.gy, thing.w, thing.d, thing.h, base);
+        prism(thing.gx, thing.gy, thing.w, thing.d, thing.h, base);
         const top = base + thing.h;
         [0.35, 0.8, 1.25].forEach((row, index) => {
           const [x1, y1] = project(thing.gx + 0.3, thing.gy + row, top);
@@ -160,14 +187,14 @@
           ctx.stroke();
         });
       } else if (thing.kind === 'pad') {
-        box(thing.gx, thing.gy, thing.w, thing.d, thing.h, base);
+        prism(thing.gx, thing.gy, thing.w, thing.d, thing.h, base);
       } else {
-        // The orb: your organization, coming down onto the pad.
-        const pad = things.find((other) => other.kind === 'pad');
-        const rest = (pad.landed ? pad.h : 0) + 12;
-        const [cx, cy] = project(6.5, 6.5, rest + (thing.landed ? 0 : lift) + ground);
+        // The orb: your organization, coming down onto the platform on its stem.
+        const pad = byId.pad;
+        const rest = (pad.landed ? pad.h : 0) + 13;
+        const [cx, cy] = project(7, 7, rest + (thing.landed ? 0 : lift) + ground);
         ctx.beginPath();
-        ctx.arc(cx, cy, 11, 0, Math.PI * 2);
+        ctx.arc(cx, cy, 12, 0, Math.PI * 2);
         ctx.fillStyle = surface;
         ctx.fill();
         ctx.strokeStyle = inkAlpha(0.9);
@@ -175,10 +202,10 @@
         ctx.stroke();
         ctx.strokeStyle = inkAlpha(0.5);
         ctx.beginPath();
-        ctx.ellipse(cx, cy, 11, 4, 0, 0, Math.PI * 2);
+        ctx.ellipse(cx, cy, 12, 4, 0, 0, Math.PI * 2);
         ctx.stroke();
         ctx.beginPath();
-        ctx.ellipse(cx, cy, 4, 11, 0, 0, Math.PI * 2);
+        ctx.ellipse(cx, cy, 4, 12, 0, 0, Math.PI * 2);
         ctx.stroke();
       }
     }
@@ -203,8 +230,8 @@
     ripples = ripples.filter((ripple) => now - ripple.at < 2400);
     draw(p, now);
 
-    story.dataset.step = p < 0.5 ? '1' : p < 0.8 ? '2' : '3';
-    if (bar) bar.style.width = `${Math.round(p * 100)}%`;
+    tags.forEach((tag) => tag.el.classList.toggle('on', tag.after.landed));
+    legend.forEach((item, index) => item.classList.toggle('on', byId[['right', 'pad', 'slab'][index]].landed));
   }
 
   function frame(now) {
@@ -212,7 +239,7 @@
     requestAnimationFrame(frame);
   }
 
-  story.classList.add('story-ready');
+  box.classList.add('dg-ready');
   if (reduceMotion) {
     // No scrolling effect: show the finished scene once, and redraw if the theme changes.
     const redraw = () => update(performance.now());
@@ -220,10 +247,10 @@
     new MutationObserver(redraw).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redraw);
   } else {
-    story.classList.add('story-live');
+    box.classList.add('dg-live');
     new IntersectionObserver(([entry]) => {
       visible = entry.isIntersecting;
-    }).observe(story);
+    }, { rootMargin: '200px 0px' }).observe(box);
     requestAnimationFrame(frame);
   }
 })();
