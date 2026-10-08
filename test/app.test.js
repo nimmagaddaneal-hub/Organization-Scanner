@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, createItem } from '../src/db.js';
+import { openDb, createItem, createSchool, syncDefaultSchool, DEFAULT_SCHOOL_NAME } from '../src/db.js';
 import { createApp } from '../src/app.js';
 
 const ADMIN_CODE = 'test-admin-code';
@@ -13,6 +13,10 @@ let server;
 let base;
 let db;
 let dbFolder;
+let demoEmails = [];
+let demoNotifier = async (request) => {
+  demoEmails.push(request);
+};
 let camera;
 let tripod;
 
@@ -87,7 +91,8 @@ before(async () => {
   await createItem(db, { name: 'Test Camera' });
   await createItem(db, { name: 'Test Tripod' });
   [camera, tripod] = (await db.prepare('SELECT * FROM items ORDER BY id').all());
-  const app = createApp({ db, sessionSecret: 'test-secret', adminSignupCode: ADMIN_CODE, teacherSignupCode: TEACHER_CODE });
+  await syncDefaultSchool(db, { adminCode: ADMIN_CODE, teacherCode: TEACHER_CODE });
+  const app = createApp({ db, sessionSecret: 'test-secret', notifyDemo: (request) => demoNotifier(request) });
   await new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', resolve);
   });
@@ -145,12 +150,12 @@ test('form rejects missing and invalid fields', async () => {
 });
 
 test('every admin route requires the login', async () => {
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete', '/admin/students', '/admin/demos']) {
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete', '/admin/students']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/admin/login', path);
   }
-  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete', '/admin/students/1/active', '/admin/demos/1/status', '/admin/demos/1/delete']) {
+  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete', ]) {
     const response = await request(path, { method: 'POST', form: { name: 'x' } });
     assert.equal(response.status, 401, path);
   }
@@ -540,9 +545,20 @@ test('student accounts: sign-up checks, login, safe redirect, separate sessions'
   assert.equal((await login({ email: good.email, password: good.password })).status, 401);
 });
 
-test('admins see student accounts and can deactivate them; teachers cannot', async () => {
+test('admins see the students who borrowed from their school; teachers cannot', async () => {
   const adminCookie = await adminLogin();
   const { account } = await studentSignup({ name: 'Findable Fran', student_id: '8080' });
+  // An account that has not borrowed anything is not shown to a school.
+  assert.doesNotMatch(await (await request('/admin/students?q=findable', { cookie: adminCookie })).text(), /Findable Fran/);
+
+  const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Students Test Lamp' }));
+  const tripodCheckout = await request(`/i/${lamp.code}/checkout`, {
+    method: 'POST',
+    cookie: (await request('/student/login', { method: 'POST', form: { email: account.email, password: account.password } })).headers
+      .getSetCookie().map((line) => line.split(';')[0]).join('; '),
+    form: { due_date: tomorrow() },
+  });
+  assert.equal(tripodCheckout.status, 303);
   const page = await (await request('/admin/students?q=findable', { cookie: adminCookie })).text();
   assert.match(page, /Findable Fran/);
   assert.match(page, /8080/);
@@ -550,15 +566,13 @@ test('admins see student accounts and can deactivate them; teachers cannot', asy
 
   const teacherCookie = cookiesFrom(await signUp({ name: 'Plain Teacher', email: 'plain.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
   assert.equal((await request('/admin/students', { cookie: teacherCookie })).status, 403);
-  assert.equal((await request('/admin/demos', { cookie: teacherCookie })).status, 403);
-
-  const id = (await db.prepare('SELECT id FROM students WHERE email = ?').get(account.email)).id;
-  assert.equal((await request(`/admin/students/${id}/active`, { method: 'POST', cookie: teacherCookie, form: { active: '0' } })).status, 403);
-  assert.equal((await request(`/admin/students/${id}/active`, { method: 'POST', cookie: adminCookie, form: { active: '0' } })).status, 303);
-  assert.equal((await db.prepare('SELECT active FROM students WHERE id = ?').get(id)).active, 0);
+  // The old owner-wide demo page is gone.
+  assert.equal((await request('/admin/demos', { cookie: adminCookie })).status, 404);
+  await request(`/admin/checkouts/${(await db.prepare("SELECT id FROM checkouts WHERE student_id = '8080'").get()).id}/return`, { method: 'POST', cookie: adminCookie });
 });
 
-test('demo requests: saved, validated, spam-resistant, admin only', async () => {
+test('demo requests: validated, saved, emailed to the owner, spam-resistant, not shown to admins', async () => {
+  demoEmails = [];
   const send = (form) => request('/demo', { method: 'POST', form });
   const valid = { name: 'Dana Director', email: 'dana@otherschool.org', school: 'Other High School', role: 'Librarian', message: 'Cameras and laptops' };
 
@@ -566,7 +580,7 @@ test('demo requests: saved, validated, spam-resistant, admin only', async () => 
   assert.match(home, /action="\/demo"/);
   assert.match(home, /Request a demo/);
 
-  // Missing fields are refused and nothing is saved.
+  // Missing fields are refused: nothing saved, nothing emailed.
   const bad = await send({ ...valid, name: '', email: 'nope', school: '' });
   assert.equal(bad.status, 400);
   const badHtml = await bad.text();
@@ -574,30 +588,37 @@ test('demo requests: saved, validated, spam-resistant, admin only', async () => 
   assert.match(badHtml, /valid email/);
   assert.match(badHtml, /school or organization/);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests').get()).n, 0);
+  assert.equal(demoEmails.length, 0);
 
-  // A valid request is saved and shows a thank-you.
+  // A valid request is saved, emailed to the owner, and shows a thank-you.
   const ok = await send(valid);
   assert.equal(ok.status, 303);
   assert.equal(ok.headers.get('location'), '/?demo=sent#demo');
   assert.match(await (await request('/?demo=sent')).text(), /Request received/);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests').get()).n, 1);
+  assert.equal(demoEmails.length, 1);
+  assert.equal(demoEmails[0].school, 'Other High School');
+  assert.equal(demoEmails[0].email, 'dana@otherschool.org');
 
-  // The hidden field catches bots: fake success, nothing saved.
+  // The hidden field catches bots: fake success, nothing saved or emailed.
   assert.equal((await send({ ...valid, website: 'http://spam.example' })).status, 303);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests').get()).n, 1);
+  assert.equal(demoEmails.length, 1);
 
-  // Admins read and manage requests. Text is escaped.
-  await send({ ...valid, school: '<script>alert(1)</script>' });
+  // A school admin cannot see demo requests anywhere.
   const adminCookie = await adminLogin();
-  const list = await (await request('/admin/demos', { cookie: adminCookie })).text();
-  assert.match(list, /Other High School/);
-  assert.match(list, /dana@otherschool\.org/);
-  assert.doesNotMatch(list, /<script>alert/);
-  const id = (await db.prepare("SELECT id FROM demo_requests WHERE school = 'Other High School'").get()).id;
-  await request(`/admin/demos/${id}/status`, { method: 'POST', cookie: adminCookie, form: { status: 'contacted' } });
-  assert.equal((await db.prepare('SELECT status FROM demo_requests WHERE id = ?').get(id)).status, 'contacted');
-  await request(`/admin/demos/${id}/delete`, { method: 'POST', cookie: adminCookie });
-  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests WHERE id = ?').get(id)).n, 0);
+  for (const path of ['/admin', '/admin/students', '/admin/people', '/admin/items', '/admin/history']) {
+    assert.doesNotMatch(await (await request(path, { cookie: adminCookie })).text(), /Other High School|dana@otherschool/, path);
+  }
+
+  // If the email service fails, the visitor still gets a success and the request is kept.
+  const working = demoNotifier;
+  demoNotifier = async () => {
+    throw new Error('email service down');
+  };
+  assert.equal((await send({ ...valid, school: 'Offline School' })).status, 303);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM demo_requests WHERE school = 'Offline School'").get()).n, 1);
+  demoNotifier = working;
 
   // Too many requests from one address are limited.
   let last;
@@ -605,6 +626,112 @@ test('demo requests: saved, validated, spam-resistant, admin only', async () => 
   assert.equal(last.status, 429);
 });
 
+test('schools are separate: each admin sees only their own school', async () => {
+  const otherId = await createSchool(db, { name: 'Other Academy', emailDomain: 'other.edu' });
+  const other = await db.prepare('SELECT * FROM schools WHERE id = ?').get(otherId);
+  assert.ok(other.admin_code && other.teacher_code && other.admin_code !== other.teacher_code);
+
+  // The first school keeps its name, and its admin is shown it.
+  const adminCookie = await adminLogin();
+  assert.match(await (await request('/admin', { cookie: adminCookie })).text(), new RegExp(DEFAULT_SCHOOL_NAME));
+
+  // The other school's codes create accounts in that school only.
+  const otherAdmin = { name: 'Olive Other', email: 'olive@other.edu', password: 'long-enough-password' };
+  const otherCookie = cookiesFrom(await signUp(otherAdmin, other.admin_code));
+  const otherTeacher = { name: 'Tom Other', email: 'tom@other.edu', password: 'long-enough-password' };
+  const otherTeacherCookie = cookiesFrom(await signUp(otherTeacher, other.teacher_code));
+  const roles = await db.prepare('SELECT email, role, school_id FROM users WHERE school_id = ? ORDER BY email').all(otherId);
+  assert.deepEqual(roles.map((row) => [row.email, row.role]), [['olive@other.edu', 'admin'], ['tom@other.edu', 'teacher']]);
+  assert.match(await (await request('/admin', { cookie: otherCookie })).text(), /Other Academy/);
+
+  // They start empty: nothing from the first school shows, not items, not check-outs, not people, not students.
+  await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'Rowland Only Kayak' } });
+  const kayak = await db.prepare("SELECT * FROM items WHERE name = 'Rowland Only Kayak'").get();
+  await request(`/i/${kayak.code}/checkout`, {
+    method: 'POST',
+    cookie: (await studentSignup({ name: 'Kay Kayaker', student_id: '5150' })).cookie,
+    form: { due_date: tomorrow() },
+  });
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/people', '/admin/students', '/admin/export.csv?scope=all']) {
+    const page = await (await request(path, { cookie: otherCookie })).text();
+    assert.doesNotMatch(page, /Rowland Only Kayak|Kay Kayaker|Test Admin|admin@example\.edu|Test Camera/, path);
+  }
+
+  // Direct links into the first school fail.
+  const kayakCheckout = await db.prepare('SELECT id FROM checkouts WHERE item_id = ?').get(kayak.id);
+  assert.equal((await request(`/admin/items/${kayak.id}/edit`, { cookie: otherCookie })).status, 404);
+  assert.equal((await request(`/admin/items/${kayak.id}/delete`, { cookie: otherCookie })).status, 404);
+  assert.equal((await request(`/admin/items/${kayak.id}`, { method: 'POST', cookie: otherCookie, form: { name: 'Stolen' } })).status, 404);
+  assert.equal((await request(`/admin/checkouts/${kayakCheckout.id}/return`, { method: 'POST', cookie: otherCookie })).status, 404);
+  assert.equal((await db.prepare('SELECT returned_at FROM checkouts WHERE id = ?').get(kayakCheckout.id)).returned_at, null);
+  assert.equal((await request(`/admin/qr?item=${kayak.id}`, { cookie: otherCookie })).status, 200);
+  assert.doesNotMatch(await (await request(`/admin/qr?item=${kayak.id}`, { cookie: otherCookie })).text(), /<svg/);
+
+  // Admins cannot manage people from another school.
+  const rowlandAdminId = (await db.prepare('SELECT id FROM users WHERE email = ?').get(ADMIN.email)).id;
+  const olive = await db.prepare('SELECT id FROM users WHERE email = ?').get(otherAdmin.email);
+  assert.equal((await request(`/admin/people/${rowlandAdminId}/active`, { method: 'POST', cookie: otherCookie, form: { active: '0' } })).status, 303);
+  assert.equal((await db.prepare('SELECT active FROM users WHERE id = ?').get(rowlandAdminId)).active, 1);
+  assert.equal((await request(`/admin/people/${rowlandAdminId}/delete`, { method: 'POST', cookie: otherCookie })).status, 404);
+  assert.equal((await request(`/admin/people/${rowlandAdminId}/delete`, { cookie: otherCookie })).status, 404);
+  assert.ok(await db.prepare('SELECT id FROM users WHERE id = ?').get(rowlandAdminId));
+
+  // And the first school's admin cannot reach the other school's people either.
+  const tom = await db.prepare('SELECT id FROM users WHERE email = ?').get(otherTeacher.email);
+  assert.equal((await request(`/admin/people/${tom.id}/delete`, { method: 'POST', cookie: adminCookie })).status, 404);
+  await request(`/admin/people/${tom.id}/active`, { method: 'POST', cookie: adminCookie, form: { active: '0' } });
+  assert.equal((await db.prepare('SELECT active FROM users WHERE id = ?').get(tom.id)).active, 1);
+  assert.doesNotMatch(await (await request('/admin/people', { cookie: adminCookie })).text(), /olive@other\.edu|tom@other\.edu|Other Academy/);
+
+  // Each admin sees their own school's sign-up codes, and not the other's.
+  const own = await (await request('/admin/people', { cookie: otherCookie })).text();
+  assert.match(own, new RegExp(other.teacher_code));
+  assert.doesNotMatch(own, new RegExp(TEACHER_CODE));
+  assert.doesNotMatch(await (await request('/admin/people', { cookie: adminCookie })).text(), new RegExp(other.teacher_code));
+
+  // The other school's items belong to it: a teacher there lists one, and only that school's admin sees it.
+  await request('/admin/items', { method: 'POST', cookie: otherTeacherCookie, form: { name: 'Academy Telescope' } });
+  assert.match(await (await request('/admin/items', { cookie: otherCookie })).text(), /Academy Telescope/);
+  assert.doesNotMatch(await (await request('/admin/items', { cookie: adminCookie })).text(), /Academy Telescope/);
+
+  // The other school's email domain is checked when a student checks out one of its items.
+  const telescope = await db.prepare("SELECT * FROM items WHERE name = 'Academy Telescope'").get();
+  const { cookie: wrongDomain } = await studentSignup({ email: 'someone@elsewhere.org' });
+  const refused = await request(`/i/${telescope.code}/checkout`, { method: 'POST', cookie: wrongDomain, form: { due_date: tomorrow() } });
+  assert.equal(refused.status, 400);
+  assert.match(await refused.text(), /@other\.edu/);
+  const { cookie: rightDomain } = await studentSignup({ email: 'pat@other.edu' });
+  assert.equal((await request(`/i/${telescope.code}/checkout`, { method: 'POST', cookie: rightDomain, form: { due_date: tomorrow() } })).status, 303);
+  assert.match(await (await request('/admin/students', { cookie: otherCookie })).text(), /pat@other\.edu/);
+  assert.doesNotMatch(await (await request('/admin/students', { cookie: adminCookie })).text(), /pat@other\.edu/);
+});
+
+test('the demo email goes to the owner through the email service', async () => {
+  const { makeDemoNotifier } = await import('../src/mail.js');
+  assert.equal(makeDemoNotifier({ apiKey: '', to: 'owner@example.com' }), null);
+  assert.equal(makeDemoNotifier({ apiKey: 'key', to: '' }), null);
+
+  const calls = [];
+  const notify = makeDemoNotifier({
+    apiKey: 'test-key',
+    to: 'owner@example.com',
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200 };
+    },
+  });
+  await notify({ name: 'Dana\nBcc: evil@example.com', email: 'dana@school.org', school: 'Line\r\nBreak School', role: '', message: 'hello' });
+  assert.equal(calls[0].url, 'https://api.resend.com/emails');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer test-key');
+  const body = JSON.parse(calls[0].init.body);
+  assert.deepEqual(body.to, ['owner@example.com']);
+  assert.equal(body.reply_to, 'dana@school.org');
+  assert.doesNotMatch(body.subject, /[\r\n]/);
+  assert.match(body.subject, /Line Break School/);
+
+  const failing = makeDemoNotifier({ apiKey: 'k', to: 'o@example.com', fetchImpl: async () => ({ ok: false, status: 403 }) });
+  await assert.rejects(() => failing({ name: 'a', email: 'a@b.co', school: 's' }), /403/);
+});
 test('wrong student passwords lock only that account, not everyone on the same network', async () => {
   const victim = (await studentSignup({ email: 'victim@example.edu' })).account;
   const bystander = (await studentSignup({ email: 'bystander@example.edu' })).account;

@@ -453,3 +453,8 @@ td form { margin: 0; }
 .demo-note { max-width: 52ch; margin: 14px auto 0; }
 .demo-card { max-width: 720px; margin: 0 auto; padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
 .demo-form button.primary { width: 100%; }
+
+.school-line { margin: 0 0 8px; }
+dl.codes { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+dl.codes dt { color: var(--muted); }
+dl.codes dd { margin: 0; }

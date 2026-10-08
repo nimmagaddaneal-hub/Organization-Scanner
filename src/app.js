@@ -48,17 +48,11 @@ function csvCell(value) {
 export function createApp({
   db,
   sessionSecret,
-  adminSignupCode = '',
-  teacherSignupCode = '',
+  notifyDemo = async () => {},
   baseUrl = '',
-  emailDomain = '',
   trustProxy = false,
 }) {
-  if (adminSignupCode && adminSignupCode === teacherSignupCode) {
-    throw new Error('The admin and teacher sign-up codes must be different');
-  }
   if (!sessionSecret) throw new Error('sessionSecret is required');
-  emailDomain = emailDomain.trim().toLowerCase().replace(/^@/, '');
 
   const app = express();
   app.disable('x-powered-by');
@@ -109,7 +103,11 @@ export function createApp({
 
   const cookieOptions = (req, extra) => ({ httpOnly: true, secure: req.secure, ...extra });
 
-  const findItem = db.prepare('SELECT * FROM items WHERE code = ? AND active = 1');
+  const findItem = db.prepare(
+    `SELECT i.*, s.name AS school_name, s.email_domain AS school_email_domain
+       FROM items i LEFT JOIN schools s ON s.id = i.school_id
+      WHERE i.code = ? AND i.active = 1`
+  );
   const findOpenCheckout = db.prepare('SELECT * FROM checkouts WHERE item_id = ? AND returned_at IS NULL');
   const markReturned = db.prepare(
     'UPDATE checkouts SET returned_at = ?, returned_by = ? WHERE id = ? AND returned_at IS NULL'
@@ -176,7 +174,7 @@ export function createApp({
   app.get('/student/signup', async (req, res) => {
     const next = safeNext(req.query.next);
     if (req.student) return res.redirect(next);
-    res.send(views.studentSignupPage({ next, emailDomain }));
+    res.send(views.studentSignupPage({ next }));
   });
 
   app.post('/student/signup', async (req, res) => {
@@ -188,7 +186,7 @@ export function createApp({
       phone: text(req.body?.phone, 30),
     };
     const password = String(req.body?.password ?? '');
-    const fail = (status, errors) => res.status(status).send(views.studentSignupPage({ next, values, errors, emailDomain }));
+    const fail = (status, errors) => res.status(status).send(views.studentSignupPage({ next, values, errors }));
 
     if (studentSignupLimiter.isBlocked(req.ip)) return fail(429, ['Too many sign-ups from this network. Try again later.']);
 
@@ -198,7 +196,6 @@ export function createApp({
     else if (!/^[A-Za-z0-9-]+$/.test(values.student_id)) errors.push('Student ID can only contain letters, numbers and dashes.');
     if (!values.email) errors.push('Enter your school email.');
     else if (!EMAIL_PATTERN.test(values.email)) errors.push('Enter a valid email address.');
-    else if (emailDomain && !values.email.endsWith(`@${emailDomain}`)) errors.push(`Use your school email ending in @${emailDomain}.`);
     if (values.phone && !STUDENT_PHONE_PATTERN.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
     if (password.length < 8) errors.push('Choose a password of 8 characters or more.');
     else if (password.length > 200) errors.push('Choose a password of 200 characters or fewer.');
@@ -276,6 +273,12 @@ export function createApp({
     await db
       .prepare('INSERT INTO demo_requests (name, email, school, role, message, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(values.name, values.email, values.school, values.role, values.message, new Date().toISOString());
+    // The request is already saved. A failed email must not make the visitor's request fail.
+    try {
+      await notifyDemo(values);
+    } catch (error) {
+      console.error('Could not email a demo request:', error.message);
+    }
     res.redirect(303, '/?demo=sent#demo');
   });
 
@@ -347,6 +350,10 @@ export function createApp({
       purpose: text(req.body?.purpose, 500),
     };
     const errors = [];
+    const domain = item.school_email_domain;
+    if (domain && !student.email.endsWith(`@${domain}`)) {
+      errors.push(`This item belongs to ${item.school_name}. Use a school email ending in @${domain}: sign up with one.`);
+    }
     if (values.phone && !STUDENT_PHONE_PATTERN.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
     if (!values.due_date) errors.push('Choose an expected return date.');
     else if (!isRealDate(values.due_date)) errors.push('Enter a valid return date.');
@@ -400,7 +407,11 @@ export function createApp({
 
   const admin = express.Router();
 
-  const findUser = db.prepare('SELECT id, name, email, role, active FROM users WHERE id = ? AND active = 1');
+  const findUser = db.prepare(
+    `SELECT u.id, u.name, u.email, u.role, u.active, u.school_id, s.name AS school_name
+       FROM users u JOIN schools s ON s.id = u.school_id
+      WHERE u.id = ? AND u.active = 1`
+  );
   // The account is looked up on every request, so deactivating someone takes effect at once.
   const currentUser = async (req) => {
     const userId = readSession(req.cookies[ADMIN_COOKIE], sessionSecret);
@@ -412,25 +423,24 @@ export function createApp({
       createSessionValue(userId, sessionSecret),
       cookieOptions(req, { sameSite: 'strict', path: '/admin', maxAge: sessionMaxAgeMs })
     );
-  const signupOpen = Boolean(adminSignupCode || teacherSignupCode);
   // Checked when the email is unknown, so a wrong email takes as long as a wrong password.
   const dummyHash = hashPassword(randomBytes(16).toString('hex'));
 
   admin.get('/login', async (req, res) => {
     if (await currentUser(req)) return res.redirect('/admin');
-    res.send(views.loginPage({ signupOpen }));
+    res.send(views.loginPage());
   });
 
   admin.post('/login', async (req, res) => {
     const email = text(req.body?.email, 254).toLowerCase();
     if (loginLimiter.isBlocked(req.ip)) {
-      return res.status(429).send(views.loginPage({ email, signupOpen, error: 'Too many attempts. Try again in 15 minutes.' }));
+      return res.status(429).send(views.loginPage({ email, error: 'Too many attempts. Try again in 15 minutes.' }));
     }
     const account = await db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     const passwordOk = verifyPassword(req.body?.password ?? '', account ? account.password_hash : dummyHash);
     if (!account || !passwordOk || !account.active) {
       loginLimiter.recordFailure(req.ip);
-      return res.status(401).send(views.loginPage({ email, signupOpen, error: 'Wrong email or password.' }));
+      return res.status(401).send(views.loginPage({ email, error: 'Wrong email or password.' }));
     }
     loginLimiter.clear(req.ip);
     startSession(req, res, account.id);
@@ -438,12 +448,10 @@ export function createApp({
   });
 
   admin.get('/signup', async (req, res) => {
-    if (!signupOpen) return res.status(404).send(views.messagePage({ title: 'Sign-up is closed', message: 'Ask an administrator for help.', status: 'warning' }));
     res.send(views.signupPage());
   });
 
   admin.post('/signup', async (req, res) => {
-    if (!signupOpen) return res.status(404).type('text').send('Sign-up is closed.');
     const values = { name: text(req.body?.name, 100), email: text(req.body?.email, 254).toLowerCase() };
     const password = String(req.body?.password ?? '');
     const signupCode = String(req.body?.signup_code ?? '');
@@ -451,10 +459,13 @@ export function createApp({
 
     if (signupLimiter.isBlocked(req.ip)) return fail(429, ['Too many attempts. Try again in 15 minutes.']);
 
-    // The code decides the role. Without a valid code nobody gets an account.
+    // The code decides the school and the role. Without a valid code nobody gets an account.
     let role = null;
-    if (adminSignupCode && safeEqual(signupCode, adminSignupCode)) role = 'admin';
-    else if (teacherSignupCode && safeEqual(signupCode, teacherSignupCode)) role = 'teacher';
+    let schoolId = null;
+    for (const school of await db.prepare('SELECT id, admin_code, teacher_code FROM schools').all()) {
+      if (school.admin_code && safeEqual(signupCode, school.admin_code)) [role, schoolId] = ['admin', school.id];
+      else if (school.teacher_code && safeEqual(signupCode, school.teacher_code)) [role, schoolId] = ['teacher', school.id];
+    }
 
     const errors = [];
     if (!values.name) errors.push('Enter your full name.');
@@ -470,8 +481,8 @@ export function createApp({
     let userId;
     try {
       const result = await db
-        .prepare('INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(values.name, values.email, hashPassword(password), role, new Date().toISOString());
+        .prepare('INSERT INTO users (name, email, password_hash, role, school_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(values.name, values.email, hashPassword(password), role, schoolId, new Date().toISOString());
       userId = result.lastInsertRowid;
     } catch (error) {
       if (String(error.message).includes('UNIQUE')) return fail(400, ['An account with this email already exists. Log in instead.']);
@@ -509,8 +520,11 @@ export function createApp({
   // Admins cannot be removed while they are the only active admin, so someone can always manage the site.
   const isLastAdmin = async (user) =>
     user.role === 'admin' &&
-    (await db.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND active = 1 AND id != ?").get(user.id))
-      .count === 0;
+    (
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND active = 1 AND id != ? AND school_id = ?")
+        .get(user.id, user.school_id)
+    ).count === 0;
 
   // Items of a removed account stay, as organization items. Check-out history is kept.
   async function removeAccount(userId) {
@@ -573,9 +587,11 @@ export function createApp({
     res.redirect(303, '/admin/login');
   });
 
-  // Teachers see only items they listed and the check-outs of those items. Admins see everything.
-  // Every query on items or check-outs below goes through this.
+  // Everyone sees only their own school. Teachers see only the items they listed and those items' check-outs;
+  // admins see everything in their school. Every query on items or check-outs below goes through this.
   function ownerScope(user, where, params) {
+    where.push('i.school_id = ?');
+    params.push(user.school_id);
     if (user.role === 'admin') return;
     where.push('i.owner_id = ?');
     params.push(user.id);
@@ -701,7 +717,7 @@ export function createApp({
         .status(400)
         .send(views.itemsPage({ user: req.user, items: await findItems(req.user), values, errors: ['Enter an item name.'] }));
     }
-    const itemId = await createItem(db, { ...values, ownerId: req.user.id });
+    const itemId = await createItem(db, { ...values, ownerId: req.user.id, schoolId: req.user.school_id });
     res.redirect(303, `/admin/qr?item=${itemId}&listed=1`);
   });
 
@@ -770,54 +786,40 @@ export function createApp({
     );
   });
 
+  // Students who have borrowed from this school. Student accounts are shared, so other schools' data is never shown.
   admin.get('/students', requireAdmin, async (req, res) => {
     const q = text(req.query.q, 100);
     const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
     const students = await db
       .prepare(
-        `SELECT s.*,
-                (SELECT COUNT(*) FROM checkouts c WHERE c.student_account_id = s.id) AS total,
-                (SELECT COUNT(*) FROM checkouts c WHERE c.student_account_id = s.id AND c.returned_at IS NULL) AS open
+        `SELECT s.id, s.name, s.student_id, s.email,
+                COUNT(*) AS total,
+                SUM(CASE WHEN c.returned_at IS NULL THEN 1 ELSE 0 END) AS open,
+                MAX(c.checked_out_at) AS last_seen
            FROM students s
-          ${q ? "WHERE s.name LIKE ? ESCAPE '\\' OR s.email LIKE ? ESCAPE '\\' OR s.student_id LIKE ? ESCAPE '\\'" : ''}
+           JOIN checkouts c ON c.student_account_id = s.id
+           JOIN items i ON i.id = c.item_id
+          WHERE i.school_id = ?
+          ${q ? "AND (s.name LIKE ? ESCAPE '\\' OR s.email LIKE ? ESCAPE '\\' OR s.student_id LIKE ? ESCAPE '\\')" : ''}
+          GROUP BY s.id
           ORDER BY s.name COLLATE NOCASE`
       )
-      .all(...(q ? [like, like, like] : []));
+      .all(...[req.user.school_id, ...(q ? [like, like, like] : [])]);
     res.send(views.studentsPage({ user: req.user, students, q }));
   });
 
-  admin.post('/students/:id/active', requireAdmin, async (req, res) => {
-    await db.prepare('UPDATE students SET active = ? WHERE id = ?').run(req.body?.active === '1' ? 1 : 0, Number(req.params.id));
-    res.redirect(303, '/admin/students');
-  });
-
-  admin.get('/demos', requireAdmin, async (req, res) => {
-    const requests = await db.prepare('SELECT * FROM demo_requests ORDER BY status = \'contacted\', created_at DESC').all();
-    res.send(views.demosPage({ user: req.user, requests }));
-  });
-
-  admin.post('/demos/:id/status', requireAdmin, async (req, res) => {
-    const status = req.body?.status === 'contacted' ? 'contacted' : 'new';
-    await db.prepare('UPDATE demo_requests SET status = ? WHERE id = ?').run(status, Number(req.params.id));
-    res.redirect(303, '/admin/demos');
-  });
-
-  admin.post('/demos/:id/delete', requireAdmin, async (req, res) => {
-    await db.prepare('DELETE FROM demo_requests WHERE id = ?').run(Number(req.params.id));
-    res.redirect(303, '/admin/demos');
-  });
-
   admin.get('/people', requireAdmin, async (req, res) => {
-    const people = await db.prepare('SELECT id, name, email, role, active, created_at FROM users ORDER BY role, name COLLATE NOCASE').all();
-    res.send(
-      views.peoplePage({ user: req.user, people, signup: { admin: Boolean(adminSignupCode), teacher: Boolean(teacherSignupCode) } })
-    );
+    const people = await db
+      .prepare('SELECT id, name, email, role, active, created_at FROM users WHERE school_id = ? ORDER BY role, name COLLATE NOCASE')
+      .all(req.user.school_id);
+    const school = await db.prepare('SELECT name, admin_code, teacher_code FROM schools WHERE id = ?').get(req.user.school_id);
+    res.send(views.peoplePage({ user: req.user, people, school }));
   });
 
   admin.get('/people/:id/delete', requireAdmin, async (req, res) => {
     const personId = Number(req.params.id);
     if (personId === req.user.id) return res.redirect('/admin/settings/delete');
-    const person = await db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(personId);
+    const person = await db.prepare('SELECT id, name, email, role FROM users WHERE id = ? AND school_id = ?').get(personId, req.user.school_id);
     if (!person) return res.status(404).type('text').send('Account not found');
     const { count } = await db.prepare('SELECT COUNT(*) AS count FROM items WHERE owner_id = ?').get(person.id);
     res.send(views.deletePersonPage({ user: req.user, person, itemCount: count }));
@@ -827,7 +829,7 @@ export function createApp({
     const personId = Number(req.params.id);
     // Your own account is removed from Settings, which asks for your password.
     if (personId === req.user.id) return res.redirect(303, '/admin/settings/delete');
-    const person = await db.prepare('SELECT id FROM users WHERE id = ?').get(personId);
+    const person = await db.prepare('SELECT id FROM users WHERE id = ? AND school_id = ?').get(personId, req.user.school_id);
     if (!person) return res.status(404).type('text').send('Account not found');
     await removeAccount(person.id);
     res.redirect(303, '/admin/people');
@@ -837,7 +839,9 @@ export function createApp({
     const personId = Number(req.params.id);
     // Admins cannot deactivate themselves, so there is always one working admin.
     if (personId === req.user.id) return res.status(400).type('text').send('You cannot deactivate your own account.');
-    await db.prepare('UPDATE users SET active = ? WHERE id = ?').run(req.body?.active === '1' ? 1 : 0, personId);
+    await db
+      .prepare('UPDATE users SET active = ? WHERE id = ? AND school_id = ?')
+      .run(req.body?.active === '1' ? 1 : 0, personId, req.user.school_id);
     res.redirect(303, '/admin/people');
   });
 

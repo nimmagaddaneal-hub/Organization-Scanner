@@ -26,7 +26,6 @@ const STAFF_LINKS = [
   ['items', '/admin/items', 'Items'],
   ['codes', '/admin/qr', 'Codes'],
   ['students', '/admin/students', 'Students', 'admin'],
-  ['demos', '/admin/demos', 'Demos', 'admin'],
   ['people', '/admin/people', 'People', 'admin'],
 ];
 
@@ -61,7 +60,7 @@ function layout({ title, body, user = null, student = null, active = '', wide = 
 </header>`;
   const content = landing
     ? `<main class="page landing">\n${body}\n</main>`
-    : `<div class="page"><main class="sheet ${wide ? 'wide' : 'narrow'}">\n${body}\n</main></div>`;
+    : `<div class="page"><main class="sheet ${wide ? 'wide' : 'narrow'}">\n${user ? `<p class="mono school-line staff-school">${esc(user.school_name)}</p>\n` : ''}${body}\n</main></div>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -80,6 +79,8 @@ ${content}
 </body>
 </html>`;
 }
+
+const schoolTag = (item) => (item.school_name ? `<p class="mono school-line">${esc(item.school_name)}</p>` : '');
 
 function errorList(errors) {
   if (!errors || errors.length === 0) return '';
@@ -221,12 +222,12 @@ export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
   <div class="section-head">
     <span class="pill">For schools</span>
     <h2>Want this at your school? <span class="accent">Ask for a demo.</span></h2>
-    <p class="muted demo-note">We set up each school ourselves. Send a request and we will get back to you with a walkthrough and staff sign-up.</p>
+    <p class="muted demo-note">Each school is set up by us personally. Send a request and we will email you to arrange a walkthrough. Staff accounts are created after that.</p>
   </div>
   <div class="demo-card frame">
     ${
       demoSent
-        ? '<div class="alert success" role="status"><strong>Request received.</strong> Thank you. We will email you soon.</div>'
+        ? '<div class="alert success" role="status"><strong>Request received.</strong> Thank you. We will email you personally soon.</div>'
         : demoForm(demo)
     }
   </div>
@@ -234,7 +235,7 @@ export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
 
 <section class="sheet cta" id="staff">
   <h2>Already set up? <span class="accent">Staff, log in.</span></h2>
-  <p>Teachers and administrators list items, print labels, and see what is checked out.</p>
+  <p>Teachers list their items and print labels. Administrators see everything in circulation at their school.</p>
   <div class="row"><a class="button primary" href="/admin">Staff login</a></div>
 </section>
 
@@ -251,7 +252,7 @@ export function messagePage({ title, message, status = 'info', student = null })
   });
 }
 
-function studentFields({ values = {}, emailDomain = '' } = {}) {
+function studentFields({ values = {} } = {}) {
   return `<label>Full name <span class="required">*</span>
     <input type="text" name="name" value="${esc(values.name)}" autocomplete="name" maxlength="100" required>
   </label>
@@ -259,8 +260,7 @@ function studentFields({ values = {}, emailDomain = '' } = {}) {
     <input type="text" name="student_id" value="${esc(values.student_id)}" inputmode="numeric" autocomplete="off" maxlength="20" required>
   </label>
   <label>School email <span class="required">*</span>
-    <input type="email" name="email" value="${esc(values.email)}" autocomplete="username" maxlength="254" required
-      ${emailDomain ? `placeholder="name@${esc(emailDomain)}"` : ''}>
+    <input type="email" name="email" value="${esc(values.email)}" autocomplete="username" maxlength="254" required>
   </label>
   <label>Phone number <span class="muted">(optional)</span>
     <input type="tel" name="phone" value="${esc(values.phone)}" autocomplete="tel" maxlength="30">
@@ -288,7 +288,7 @@ ${error ? `<div class="alert error" role="alert">${esc(error)}</div>` : ''}
   });
 }
 
-export function studentSignupPage({ errors = [], values = {}, next = '/account', emailDomain = '' } = {}) {
+export function studentSignupPage({ errors = [], values = {}, next = '/account' } = {}) {
   return layout({
     title: 'Create a student account',
     body: `<h1>Create a student account</h1>
@@ -296,7 +296,7 @@ export function studentSignupPage({ errors = [], values = {}, next = '/account',
 ${errorList(errors)}
 <form method="post" action="/student/signup" class="card" novalidate>
   <input type="hidden" name="next" value="${esc(next)}">
-  ${studentFields({ values, emailDomain })}
+  ${studentFields({ values })}
   <label>Password <span class="muted">(8 characters or more)</span>
     <input type="password" name="password" autocomplete="new-password" minlength="8" maxlength="200" required>
   </label>
@@ -316,6 +316,7 @@ export function loginRequiredPage({ item }) {
     title: `Log in to check out ${item.name}`,
     body: `<div class="card center">
 <h1>${esc(item.name)}</h1>
+${schoolTag(item)}
 ${item.description ? `<p class="muted">${esc(item.description)}</p>` : ''}
 <div class="alert info" role="status">Log in to check this item out, or to return it.</div>
 <div class="stack">
@@ -333,6 +334,7 @@ export function checkoutFormPage({ item, student, values = {}, errors = [], toda
     body: `<h1>Check out an item</h1>
 ${errorList(errors)}
 <form method="post" action="/i/${esc(item.code)}/checkout" class="card" novalidate>
+  ${schoolTag(item)}
   <label>Item
     <input type="text" value="${esc(item.name)}" readonly>
   </label>
@@ -369,6 +371,7 @@ export function ownCheckoutPage({ item, student, checkout, justCheckedOut }) {
     student,
     body: `<div class="card center">
 <h1>${esc(item.name)}</h1>
+${schoolTag(item)}
 ${heading}
 <dl class="summary">
   <dt>Checked out</dt><dd>${esc(formatDateTime(checkout.checked_out_at))}</dd>
@@ -390,6 +393,7 @@ export function unavailablePage({ item, student = null }) {
     student,
     body: `<div class="card center">
 <h1>${esc(item.name)}</h1>
+${schoolTag(item)}
 <div class="alert warning" role="status"><strong>Unavailable.</strong> This item is already checked out.</div>
 ${
   student
@@ -481,7 +485,7 @@ export function signupPage({ errors = [], values = {} } = {}) {
   return layout({
     title: 'Create a staff account',
     body: `<h1>Create a staff account</h1>
-<p class="muted">For administrators and teachers. You need the sign-up code from your organization.</p>
+<p class="muted">For administrators and teachers. You need the sign-up code from your school. It decides which school you join.</p>
 ${errorList(errors)}
 <form method="post" action="/admin/signup" class="card" novalidate>
   <label>Full name
@@ -496,22 +500,29 @@ ${errorList(errors)}
   <label>Sign-up code
     <input type="password" name="signup_code" autocomplete="off" maxlength="200" required>
   </label>
-  <p class="muted small">The admin code creates an administrator account. The teacher code creates a teacher account.</p>
+  <p class="muted small">Your school's admin code makes an administrator account. Its teacher code makes a teacher account.</p>
   <button class="primary">Create account</button>
 </form>
 <p class="center"><a href="/admin/login">Back to login</a></p>`,
   });
 }
 
-export function peoplePage({ user, people, signup }) {
+export function peoplePage({ user, people, school }) {
   return layout({
     title: 'People',
     user,
     active: 'people',
     wide: true,
     body: `<h1>People</h1>
-<p class="muted">Staff accounts. Admin sign-up is <strong>${signup.admin ? 'open' : 'closed'}</strong>, teacher sign-up is <strong>${signup.teacher ? 'open' : 'closed'}</strong>.
-New staff sign up at <code>/admin/signup</code> with the code you give them.</p>
+<p class="page-sub">Staff accounts at ${esc(school.name)}. Only your school's staff are listed.</p>
+<section class="card">
+  <h2>Sign-up codes</h2>
+  <p class="muted small">Staff join your school at <code>/admin/signup</code> with one of these codes. Give the teacher code to teachers. Keep the admin code to yourself: an administrator sees every item and student record in the school.</p>
+  <dl class="codes">
+    <dt>Admin code</dt><dd>${school.admin_code ? `<code>${esc(school.admin_code)}</code>` : '<span class="muted">closed</span>'}</dd>
+    <dt>Teacher code</dt><dd>${school.teacher_code ? `<code>${esc(school.teacher_code)}</code>` : '<span class="muted">closed</span>'}</dd>
+  </dl>
+</section>
 <div class="table-wrap"><table>
 <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th>Status</th><th></th></tr></thead>
 <tbody>
@@ -872,7 +883,7 @@ export function deletePersonPage({ user, person, itemCount }) {
   });
 }
 
-// ---------- Students and demo requests (admins) ----------
+// ---------- Students (admins) ----------
 
 export function studentsPage({ user, students, q }) {
   return layout({
@@ -880,7 +891,7 @@ export function studentsPage({ user, students, q }) {
     user,
     active: 'students',
     wide: true,
-    body: `<div class="page-head"><div><h1>Students</h1><p class="page-sub">Student accounts. Deactivating blocks a login; check-out history is kept.</p></div></div>
+    body: `<div class="page-head"><div><h1>Students</h1><p class="page-sub">Students who have borrowed from ${esc(user.school_name)}, and what they have out.</p></div></div>
 <form method="get" action="/admin/students" class="filters no-print">
   <input type="search" name="q" value="${esc(q)}" placeholder="Search name, ID or email" aria-label="Search">
   <button class="secondary">Search</button>
@@ -889,64 +900,22 @@ export function studentsPage({ user, students, q }) {
 ${
   students.length
     ? `<div class="table-wrap"><table>
-<thead><tr><th>Name</th><th>Student ID</th><th>Email</th><th>Joined</th><th>Out now</th><th>All check-outs</th><th>Status</th><th></th></tr></thead>
+<thead><tr><th>Name</th><th>Student ID</th><th>Email</th><th>Out now</th><th>All check-outs</th><th>Last check-out</th></tr></thead>
 <tbody>
 ${students
   .map(
-    (row) => `<tr class="${row.active ? '' : 'row-retired'}">
+    (row) => `<tr>
   <td>${esc(row.name)}</td>
   <td>${esc(row.student_id)}</td>
   <td>${esc(row.email)}</td>
-  <td>${esc(formatDateTime(row.created_at))}</td>
   <td>${row.open}</td>
   <td>${row.total}</td>
-  <td>${row.active ? '<span class="badge ontime">Active</span>' : '<span class="badge returned">Deactivated</span>'}</td>
-  <td><form method="post" action="/admin/students/${row.id}/active">
-    <input type="hidden" name="active" value="${row.active ? '0' : '1'}">
-    <button class="secondary small">${row.active ? 'Deactivate' : 'Reactivate'}</button>
-  </form></td>
+  <td>${esc(formatDateTime(row.last_seen))}</td>
 </tr>`
   )
   .join('')}
 </tbody></table></div>`
-    : `<p class="card empty">${q ? 'No students match this search.' : 'No student accounts yet.'}</p>`
-}`,
-  });
-}
-
-export function demosPage({ user, requests }) {
-  return layout({
-    title: 'Demo requests',
-    user,
-    active: 'demos',
-    wide: true,
-    body: `<div class="page-head"><div><h1>Demo requests</h1><p class="page-sub">Schools that asked for a demo from the home page. Reply by email, then mark them contacted.</p></div></div>
-${
-  requests.length
-    ? `<div class="table-wrap"><table>
-<thead><tr><th>Received</th><th>School</th><th>Contact</th><th>Role</th><th>Message</th><th>Status</th><th></th></tr></thead>
-<tbody>
-${requests
-  .map(
-    (row) => `<tr>
-  <td>${esc(formatDateTime(row.created_at))}</td>
-  <td>${esc(row.school)}</td>
-  <td>${esc(row.name)}<div class="small"><a href="mailto:${esc(row.email)}">${esc(row.email)}</a></div></td>
-  <td>${esc(row.role)}</td>
-  <td>${esc(row.message)}</td>
-  <td>${row.status === 'new' ? '<span class="badge overdue-soft">New</span>' : '<span class="badge returned">Contacted</span>'}</td>
-  <td><div class="row-actions">
-    <form method="post" action="/admin/demos/${row.id}/status">
-      <input type="hidden" name="status" value="${row.status === 'new' ? 'contacted' : 'new'}">
-      <button class="secondary small">${row.status === 'new' ? 'Mark contacted' : 'Mark new'}</button>
-    </form>
-    <form method="post" action="/admin/demos/${row.id}/delete"><button class="link-button danger-link">Delete</button></form>
-  </div></td>
-</tr>`
-  )
-  .join('')}
-</tbody></table></div>`
-    : '<p class="card empty">No demo requests yet.</p>'
+    : `<p class="card empty">${q ? 'No students match this search.' : 'No student has borrowed from this school yet.'}</p>`
 }`,
   });
 }

@@ -69,22 +69,34 @@ A phone cannot open `localhost`. To scan real QR codes while the system runs on 
 
 Some school Wi-Fi networks block devices from talking to each other. If the phone cannot connect, deploy the system (below) or use a phone hotspot.
 
+## Schools
+
+The site serves several schools. **Each school is separate**: its own administrators, teachers, items, check-outs and sign-up codes. An administrator is the administrator **of their school only**. They never see another school's staff, items, students or demo requests.
+
+- **The first school** is called **Rowland Hall organization drawer**. It is created automatically. Its sign-up codes come from `ADMIN_SIGNUP_CODE` and `TEACHER_SIGNUP_CODE` in your settings, and its student email domain (optional) from `SCHOOL_EMAIL_DOMAIN`. Everything made before schools existed belongs to it.
+- **Other schools are set up by you, personally**, after they ask for a demo (see below). From this folder:
+  ```bash
+  npm run schools -- add "Other Academy" --domain other.edu
+  ```
+  It prints that school's admin code and teacher code. Send the admin code to the school's administrator. They sign up at `/admin/signup` and become that school's administrator. The page **People** shows them both codes, so they can give the teacher code to their teachers.
+- Other commands: `npm run schools -- list [--codes]`, `npm run schools -- codes <id>` (new codes; the old ones stop working), `npm run schools -- rename <id> "New name"`.
+- This tool uses the database in your `.env`. To add a school to the **live** site, put `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` (from your Render settings) in your local `.env` first, run the command, then remove them again.
+
 ## Staff accounts
 
-There are two kinds of staff account. Both sign up at `/admin/signup` with a name, email, password (10 characters or more) and a sign-up code. **The code decides the role.**
+There are two kinds of staff account. Both sign up at `/admin/signup` with a name, email, password (10 characters or more) and a sign-up code. **The code decides the school and the role.**
 
 | Role | Sign-up code | Can do |
 | --- | --- | --- |
-| Admin | `ADMIN_SIGNUP_CODE` | Everything: all items, all check-outs, history, CSV, code labels, **People** page |
-| Teacher | `TEACHER_SIGNUP_CODE` | List items, print their codes, see and return check-outs of **their own items only** |
+| Admin | the school's admin code | See everything in circulation at their school: all items, check-outs, history, CSV, code labels, students, **People** |
+| Teacher | the school's teacher code | List items, print their codes, see and return check-outs of **their own items only** |
 
-- Hand the admin code only to people who may see all student data. Anyone with that code can make an admin account.
-- To close sign-up, empty the code in `.env` (or your host's settings) and restart. Existing accounts keep working.
-- Admins open **People** to see all accounts and to **Deactivate** one. A deactivated account is logged out at once.
+- Hand the admin code only to people who may see all student data at that school.
+- To close sign-up for the first school, empty its code in your settings and restart. Existing accounts keep working.
+- Admins open **People** to see their school's accounts and to **Deactivate** or **Delete** one (after a confirmation page). A deactivated account is logged out at once.
 - Log in at `/admin` with email and password. The login lasts 8 hours. After 8 wrong passwords, logins from that address are blocked for 15 minutes.
-- Click your name in the top bar to open **Settings**: change your name, change your password (asks for the current one), or delete your own account (asks for your password). Deleting an account keeps its items, which become organization items, and keeps all check-out history. The only remaining admin cannot delete their own account.
-- Admins can also **Delete** other accounts on the **People** page (after a confirmation page). Use **Deactivate** instead to block a login but keep the account.
-- There is no "forgot password" email. If someone forgets their password, an admin deactivates the account and the person signs up again with a different email. (Or delete their row from the `users` table and they can sign up again with the same email.)
+- Click your name in the top bar to open **Settings**: change your name, change your password (asks for the current one), or delete your own account (asks for your password). Deleting an account keeps its items, which become organization items, and keeps all check-out history. The only remaining admin of a school cannot delete their own account.
+- There is no "forgot password" email. An admin deactivates the account and the person signs up again with a different email.
 - Passwords are stored only as salted scrypt hashes.
 
 ## List items and print codes
@@ -111,18 +123,27 @@ To remove an item for good, click **Delete** and confirm. This also deletes the 
 - At check-out the form is filled in from the account (name, ID, email). The student adds a return date and optional phone and notes.
 - Scanning an item while logged out asks the student to log in or sign up, then returns them to that item.
 - **My items** (`/account`) lists what a student has out, with a Return button, plus their history.
-- Staff see the account on each check-out (an **Account** tag). Admins also get a **Students** page: search accounts, see how many items each has out, and deactivate an account (it is logged out at once; history is kept).
+- Student accounts are shared by all schools. Staff see the account on each check-out (an **Account** tag). An admin's **Students** page lists only the students who have borrowed from **their** school, with how many items each has out.
 - A student returns an item by being logged in as the person who checked it out. From another phone: log in there, then scan.
 - Check-outs made before this feature have no account. Admins can mark those returned on the dashboard.
 - Student logins last 30 days. After 8 wrong passwords for one account, that account is blocked for 15 minutes. Other students are not affected, so a whole school sharing one network is fine.
-- There is no student "forgot password" email yet. An admin deactivates the account, and the student signs up again with a different email.
-- If `SCHOOL_EMAIL_DOMAIN` is set, only emails ending in that domain can sign up. **Set it**, so only your school's addresses get accounts.
+- There is no student "forgot password" email yet.
+- A school can require its own email domain (`SCHOOL_EMAIL_DOMAIN` for the first school, `--domain` when adding another). The check happens at check-out: a student whose email does not match cannot borrow that school's items.
 
 ## Demo requests from other schools
 
-The home page has a **Request a demo** button (top) and a form (bottom). Each request is saved. Admins read them on the **Demos** page, reply by email, and mark them contacted. Nothing is emailed automatically, so **check the Demos page**. A hidden field and a limit of 5 requests per hour per address keep bots out.
+The home page has a **Request a demo** button (top) and a form (bottom). Each request is **emailed to you**, and also saved in the database so nothing is lost if the email fails. **School administrators never see demo requests.** There is no page for them.
 
-Staff sign-up needs a code, so a new school only gets staff access after you give it a code.
+To get the emails, set these in your settings (all three are in `.env.example`):
+
+1. Sign up at <https://resend.com> with **your own email address**, and create an API key.
+2. `RESEND_API_KEY`: that key.
+3. `DEMO_NOTIFY_EMAIL`: your email address, the one you signed up to Resend with. Resend's free test sender delivers only to that address, which is what you need here. (Check Resend's current rules on their site.)
+4. Optional `MAIL_FROM`: leave empty to use `Item Check-out <onboarding@resend.dev>`.
+
+Replying to the email answers the person who asked. Then you set their school up with `npm run schools -- add`.
+
+Without these settings, requests are still saved, but you are not told. The server log says so at start. A hidden field and a limit of 5 requests per hour per address keep bots out.
 
 ## How it works for students
 
@@ -155,9 +176,10 @@ Steps:
 3. **Create the site.** Sign up at <https://render.com> with your GitHub account. Click **New > Blueprint**, pick this repository. Render reads `render.yaml` and asks for:
    - `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`: the two values from step 2.
    - `ADMIN_SIGNUP_CODE` and `TEACHER_SIGNUP_CODE`: two different secret codes you make up, 8 characters or more.
+   - `DEMO_NOTIFY_EMAIL` and `RESEND_API_KEY`: where demo requests are emailed (see [Demo requests](#demo-requests-from-other-schools)).
    - `TZ`: your time zone, for example `America/Chicago`. Without it, due dates use UTC.
 4. Click **Apply** and wait for the deploy to finish. Render shows the public address, like `https://organization-scanner.onrender.com`.
-5. Open `THAT-ADDRESS/admin/signup` and create your admin account with the admin code.
+5. Open `THAT-ADDRESS/admin/signup` and create your admin account with the admin code. You become the administrator of **Rowland Hall organization drawer**.
 6. List items and print the codes. The QR codes use the public address automatically.
 
 To change a setting later: Render dashboard > the service > **Environment**. Saving restarts the site.
@@ -199,7 +221,7 @@ Hosted on Turso: the Turso dashboard has backups and a data browser. Local or Fl
 - **"Barcode" means both:** every label has a QR code (for phones) and a Code 128 barcode (for handheld scanners).
 - **Items can be retired or deleted.** Retiring keeps the history. Deleting removes the item and its check-out records, after a confirmation page.
 - **Overdue** means the expected return date is before today. An item due today is on time.
-- **Email domain is not enforced** unless you set `SCHOOL_EMAIL_DOMAIN`.
+- **Email domain is not enforced** for a school unless you set one.
 - **Student ID** accepts letters, numbers and dashes, up to 20 characters.
 - **No email reminders.** Overdue items are highlighted on the dashboard; emails open in your mail app when clicked.
 
@@ -238,6 +260,7 @@ Run these by hand after setup or after any change:
 - [ ] Open **Settings** (click your name): change the name, change the password (wrong current password is refused), log in with the new password.
 - [ ] Delete your own teacher account in Settings: you are logged out, your items remain as organization items. The only admin is refused.
 - [ ] As admin, open **People**, **Delete** a teacher account after the confirmation page.
-- [ ] As admin, open **Students**: the account shows with its check-out counts. Deactivate it: the student is logged out.
-- [ ] On the home page, send a demo request. It appears on the admin **Demos** page. Mark it contacted.
+- [ ] As admin, open **Students**: the student who borrowed shows with their check-out counts.
+- [ ] On the home page, send a demo request. It arrives in your own inbox. It is not visible anywhere in the admin pages.
+- [ ] Add a second school (`npm run schools -- add`), sign up as its admin: you see none of the first school's items, people or students.
 - [ ] As admin, open **People** and deactivate the teacher. The teacher is logged out and cannot log in.

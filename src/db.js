@@ -3,7 +3,22 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
+// The first school. Accounts and items made before schools existed belong to it.
+export const DEFAULT_SCHOOL_ID = 1;
+export const DEFAULT_SCHOOL_NAME = 'Rowland Hall organization drawer';
+
 const SCHEMA = `
+-- Each school has its own staff, items and check-outs. Admins and teachers see only their own school.
+-- The sign-up codes decide which school (and role) a new staff account joins.
+CREATE TABLE IF NOT EXISTS schools (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  admin_code    TEXT,
+  teacher_code  TEXT,
+  email_domain  TEXT,
+  created_at    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS items (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   code        TEXT NOT NULL UNIQUE,
@@ -102,6 +117,19 @@ export async function openDb({ url, authToken }) {
   if (!itemColumns.includes('owner_id')) {
     await client.execute('ALTER TABLE items ADD COLUMN owner_id INTEGER REFERENCES users(id)');
   }
+  // Databases made before schools existed: everything belongs to the first school.
+  await client.execute({
+    sql: 'INSERT OR IGNORE INTO schools (id, name, created_at) VALUES (?, ?, ?)',
+    args: [DEFAULT_SCHOOL_ID, DEFAULT_SCHOOL_NAME, new Date().toISOString()],
+  });
+  for (const table of ['users', 'items']) {
+    const columns = (await db.prepare(`PRAGMA table_info(${table})`).all()).map((column) => column.name);
+    if (!columns.includes('school_id')) {
+      await client.execute(`ALTER TABLE ${table} ADD COLUMN school_id INTEGER REFERENCES schools(id)`);
+    }
+    await client.execute({ sql: `UPDATE ${table} SET school_id = ? WHERE school_id IS NULL`, args: [DEFAULT_SCHOOL_ID] });
+  }
+
   // Check-outs made before student accounts existed have no account.
   const checkoutColumns = (await db.prepare('PRAGMA table_info(checkouts)').all()).map((column) => column.name);
   if (!checkoutColumns.includes('student_account_id')) {
@@ -116,9 +144,37 @@ export function newItemCode() {
 }
 
 // ownerId is the staff member who listed the item. null means it belongs to the organization.
-export async function createItem(db, { name, description = '', ownerId = null }) {
+export async function createItem(db, { name, description = '', ownerId = null, schoolId = DEFAULT_SCHOOL_ID }) {
   const result = await db
-    .prepare('INSERT INTO items (code, name, description, owner_id, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(newItemCode(), name, description, ownerId, new Date().toISOString());
+    .prepare('INSERT INTO items (code, name, description, owner_id, school_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(newItemCode(), name, description, ownerId, schoolId, new Date().toISOString());
   return Number(result.lastInsertRowid);
+}
+
+// Sign-up codes are random and given to staff by hand.
+export function newSignupCode() {
+  return randomBytes(9).toString('base64url');
+}
+
+export async function createSchool(db, { name, emailDomain = null }) {
+  const result = await db
+    .prepare('INSERT INTO schools (name, admin_code, teacher_code, email_domain, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(name, newSignupCode(), newSignupCode(), emailDomain, new Date().toISOString());
+  return Number(result.lastInsertRowid);
+}
+
+// The first school takes its sign-up codes and email domain from the environment.
+// An empty value closes that kind of sign-up.
+export async function syncDefaultSchool(db, { adminCode = '', teacherCode = '', emailDomain = '' } = {}) {
+  if (adminCode && adminCode === teacherCode) {
+    throw new Error('The admin and teacher sign-up codes must be different');
+  }
+  await db
+    .prepare('UPDATE schools SET admin_code = ?, teacher_code = ?, email_domain = ? WHERE id = ?')
+    .run(
+      adminCode || null,
+      teacherCode || null,
+      emailDomain.trim().toLowerCase().replace(/^@/, '') || null,
+      DEFAULT_SCHOOL_ID
+    );
 }

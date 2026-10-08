@@ -23,5 +23,9 @@ services:
         sync: false
       - key: TEACHER_SIGNUP_CODE
         sync: false
+      - key: DEMO_NOTIFY_EMAIL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
       - key: TZ
         sync: false
