@@ -77,6 +77,7 @@ function layout({ title, body, user = null, student = null, active = '', wide = 
 <body>
 ${header}
 ${content}
+${landing ? '' : '<footer class="site-footer no-print"><a href="/privacy">Privacy and terms</a></footer>'}
 </body>
 </html>`;
 }
@@ -295,7 +296,7 @@ export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
   <div class="row"><a class="button primary" href="/admin">Staff login</a></div>
 </section>
 
-<p class="mono site-footer">Item Check-out &middot; for school organizations</p>
+<p class="mono site-footer">Item Check-out &middot; for school organizations &middot; <a href="/privacy">Privacy and terms</a></p>
 <script src="/hero.js" defer></script>
 <script src="/diagram.js" defer></script>`,
   });
@@ -360,6 +361,7 @@ ${errorList(errors)}
   <label>Confirm password
     <input type="password" name="confirm_password" autocomplete="new-password" minlength="8" maxlength="200" required>
   </label>
+  <p class="muted small">By creating an account you agree to the <a href="/privacy">privacy and terms</a>.</p>
   <button class="primary">Create account</button>
 </form>
 <p class="center">Already have an account? <a href="/student/login?next=${esc(encodeURIComponent(next))}">Log in</a></p>`,
@@ -565,7 +567,7 @@ ${errorList(errors)}
   <label>Sign-up code
     <input type="password" name="signup_code" autocomplete="off" maxlength="200" required>
   </label>
-  <p class="muted small">Your school's admin code makes an administrator account. Its teacher code makes a teacher account.</p>
+  <p class="muted small">Your school's admin code makes an administrator account. Its teacher code makes a teacher account. By creating an account you agree to the <a href="/privacy">privacy and terms</a>.</p>
   <button class="primary">Create account</button>
 </form>
 <p class="center"><a href="/admin/login">Back to login</a></p>`,
@@ -1067,5 +1069,90 @@ ${errorList(errors)}
   </label>
   <button class="primary">Save password</button>
 </form>`,
+  });
+}
+
+// ---------- Privacy and terms ----------
+
+export function privacyPage({ student = null, user = null } = {}) {
+  return layout({
+    title: 'Privacy and terms',
+    student,
+    user,
+    body: `<h1>Privacy and terms</h1>
+<p class="page-sub">Last updated October 8, 2026. Plain language, no tricks.</p>
+
+<section class="card prose">
+  <h2>What this is</h2>
+  <p>Item Check-out is a tool that school organizations use to lend out items: cameras, tables, speakers, anything with a QR code on it. Each school decides who may use it and is responsible for its own students' records.</p>
+</section>
+
+<section class="card prose">
+  <h2>What we collect</h2>
+  <h3>Students</h3>
+  <ul>
+    <li>Your name, student ID or lunch number, and school email.</li>
+    <li>A phone number, only if you choose to give one.</li>
+    <li>A password. We keep only a scrambled version of it, never the password itself.</li>
+    <li>What you check out and return, when, the return date you chose, and any notes you wrote.</li>
+  </ul>
+  <h3>Teachers and administrators</h3>
+  <ul>
+    <li>Your name, email, role, school, and a scrambled version of your password.</li>
+    <li>The items you list.</li>
+  </ul>
+  <h3>Schools that ask for a demo</h3>
+  <ul>
+    <li>The name, email, school, role and message you type into the demo form. They are emailed to the person who runs the site and saved so the request is not lost.</li>
+  </ul>
+  <p>We do not collect payment details, your location, or anything from your device beyond what a website normally receives. There are no ads, no analytics, no tracking, and no third-party scripts on these pages.</p>
+</section>
+
+<section class="card prose">
+  <h2>Who can see it</h2>
+  <ul>
+    <li><strong>Only staff at the school that owns the item.</strong> An administrator of that school sees every check-out of that school's items. A teacher sees only the check-outs of the items they listed.</li>
+    <li><strong>Other schools never see it.</strong> Staff at one school cannot see another school's items, staff, check-outs or students.</li>
+    <li>Other students never see who has an item. They only see that it is unavailable.</li>
+    <li>The person who runs the site can access the database in order to run the service, for example to create schools or help with a lost password.</li>
+    <li>The service runs on hosting and database providers, who store the data for us. We do not sell your data and we do not share it for advertising.</li>
+  </ul>
+</section>
+
+<section class="card prose">
+  <h2>Cookies and storage</h2>
+  <p>We use only the cookies needed to keep you logged in. Staff logins last 8 hours and student logins last 30 days, and they end when you log out or change your password. Your light or dark choice is saved in your browser. Nothing else is stored.</p>
+</section>
+
+<section class="card prose">
+  <h2>Keeping and deleting records</h2>
+  <ul>
+    <li>Records are kept while your school uses the service, so that staff can see what is out and what was returned.</li>
+    <li>Teachers and administrators can delete their own account in Settings. Check-out history is kept by the school.</li>
+    <li>To have a student account and its personal details erased, ask your school's administrator, who can ask the person who runs the site. Past check-outs then show no name, ID or email.</li>
+  </ul>
+</section>
+
+<section class="card prose">
+  <h2>Students under 13</h2>
+  <p>Schools that use this service are responsible for getting any permission the law requires, such as parent or school consent for students under 13, before students make accounts. We collect only what is listed above, and only to run the lending service.</p>
+</section>
+
+<section class="card prose">
+  <h2>Terms of use</h2>
+  <ul>
+    <li>Use the service to borrow and return items that belong to your school or organization.</li>
+    <li>Give true details, and do not use anyone else's account. Keep your password to yourself.</li>
+    <li>Items stay the property of the school. Return them by the date you chose, and tell a teacher about any damage.</li>
+    <li>Staff must use student information only to run lending, and must not share it.</li>
+    <li>The service is provided as it is, and may change or have downtime. It is not a substitute for a school's own safety or insurance rules.</li>
+    <li>Misuse can lead to an account being deactivated.</li>
+  </ul>
+</section>
+
+<section class="card prose">
+  <h2>Questions</h2>
+  <p>Ask your school's administrator. Schools that want to use the service can <a href="/#demo">request a demo</a>.</p>
+</section>`,
   });
 }

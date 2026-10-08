@@ -289,6 +289,8 @@ export function createApp({
 
   app.get('/', async (req, res) => res.send(homePage(req, { demoSent: req.query.demo === 'sent' })));
 
+  app.get('/privacy', async (req, res) => res.send(views.privacyPage({ student: req.student })));
+
   app.post('/demo', async (req, res) => {
     const values = {
       name: text(req.body?.name, 100),

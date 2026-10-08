@@ -910,3 +910,17 @@ test('late items get a ready-written email link, on time items do not', async ()
     await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), item.id);
   }
 });
+
+test('privacy and terms page is public and linked from the sign-up forms', async () => {
+  const page = await request('/privacy');
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /<h1>Privacy and terms<\/h1>/);
+  assert.match(html, /Other schools never see it/);
+  assert.match(html, /scrambled version of your password/);
+  for (const path of ['/', '/student/signup', '/admin/signup', '/student/login', '/privacy']) {
+    assert.match(await (await request(path)).text(), /href="\/privacy"/, path);
+  }
+  assert.match(await (await request('/student/signup')).text(), /you agree to the <a href="\/privacy">/);
+  assert.match(await (await request('/admin/signup')).text(), /you agree to the <a href="\/privacy">/);
+});
