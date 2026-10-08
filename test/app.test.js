@@ -872,3 +872,41 @@ test('students see a warning when something is late', async () => {
   assert.match(await (await request('/', { cookie })).text(), /1 late/);
   await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), lamp.id);
 });
+
+test('late items get a ready-written email link, on time items do not', async () => {
+  const adminCookie = await adminLogin();
+  const [late, fine] = await Promise.all(
+    ['Mail Test Late', 'Mail Test Fine'].map(async (name) =>
+      db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name }))
+    )
+  );
+  const a = await checkoutFor(late, { student_name: 'Lena Late', email: 'lena.late@example.edu' });
+  const b = await checkoutFor(fine, { student_name: 'Oscar Ontime', email: 'oscar.ontime@example.edu' });
+  assert.equal(a.response.status, 303);
+  assert.equal(b.response.status, 303);
+  await db.prepare("UPDATE checkouts SET due_date = '2020-01-01' WHERE item_id = ? AND returned_at IS NULL").run(late.id);
+
+  const page = await (await request('/admin', { cookie: adminCookie })).text();
+  const links = [...page.matchAll(/href="(mailto:[^"]*subject=[^"]*)"/g)].map((match) => match[1].replaceAll('&amp;', '&'));
+  const one = links.find((link) => link.startsWith('mailto:lena.late%40example.edu'));
+  assert.ok(one, 'reminder link for the late student');
+  const decoded = decodeURIComponent(one);
+  assert.match(decoded, /Reminder: Mail Test Late was due/);
+  assert.match(decoded, /Hi Lena,/);
+  assert.match(decoded, /Test Admin/);
+  assert.ok(!links.some((link) => link.includes('oscar.ontime')), 'no reminder for on-time items');
+
+  const all = links.find((link) => link.startsWith('mailto:?bcc='));
+  assert.ok(all, 'one email for everyone late');
+  assert.match(decodeURIComponent(all), /lena\.late@example\.edu/);
+  assert.doesNotMatch(decodeURIComponent(all), /oscar\.ontime/);
+
+  // A student's name with markup is escaped on the page and encoded in the link.
+  await db.prepare("UPDATE checkouts SET student_name = ? WHERE item_id = ? AND returned_at IS NULL").run('<b>Bold</b> "Quote"', late.id);
+  const risky = await (await request('/admin', { cookie: adminCookie })).text();
+  assert.doesNotMatch(risky, /<b>Bold<\/b>/);
+
+  for (const item of [late, fine]) {
+    await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), item.id);
+  }
+});

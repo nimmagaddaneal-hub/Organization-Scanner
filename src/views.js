@@ -635,7 +635,42 @@ function filterForm({ action, q, status, statuses }) {
 </form>`;
 }
 
+// A ready-written email that opens in the staff member's own mail app. No email service is involved.
+function reminderLink(row, user) {
+  const first = String(row.student_name).trim().split(/\s+/)[0] || 'there';
+  const subject = `Reminder: ${row.item_name} was due ${formatDate(row.due_date)}`;
+  const body = [
+    `Hi ${first},`,
+    '',
+    `This is a reminder that "${row.item_name}" was due back on ${formatDate(row.due_date)}. Please return it as soon as you can. You can scan its code again, or open My items on the site.`,
+    '',
+    'Thank you,',
+    user.name,
+    user.school_name,
+  ].join('\n');
+  return `mailto:${encodeURIComponent(row.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+// One email to everyone who is late, with the addresses hidden from each other (Bcc).
+function reminderAllLink(rows, user, today) {
+  const late = rows.filter((row) => row.due_date < today);
+  const emails = [...new Set(late.map((row) => row.email))];
+  if (emails.length === 0) return null;
+  const subject = 'Reminder: items past their return date';
+  const body = [
+    'Hi,',
+    '',
+    'This is a reminder that an item you checked out is past its return date. Please return it as soon as you can. Open My items on the site to see what you have out.',
+    '',
+    'Thank you,',
+    user.name,
+    user.school_name,
+  ].join('\n');
+  return `mailto:?bcc=${emails.map(encodeURIComponent).join(',')}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
 export function dashboardPage({ user, rows, q, status, today, counts }) {
+  const allLink = reminderAllLink(rows, user, today);
   const body = rows.length
     ? `<div class="table-wrap"><table>
 <thead><tr><th>Item</th><th>Student</th><th>Student ID</th><th>Email</th><th>Checked out</th><th>Due</th><th>Status</th><th class="no-print"></th></tr></thead>
@@ -650,7 +685,11 @@ ${rows
   <td>${esc(formatDateTime(row.checked_out_at))}</td>
   <td>${esc(formatDate(row.due_date))}</td>
   <td>${statusBadge(row, today)}</td>
-  <td class="no-print"><form method="post" action="/admin/checkouts/${row.id}/return"><button class="secondary small">Mark returned</button></form></td>
+  <td class="no-print"><div class="row-actions"><form method="post" action="/admin/checkouts/${row.id}/return"><button class="secondary small">Mark returned</button></form>${
+      row.due_date < today
+        ? `<a class="button secondary small" href="${esc(reminderLink(row, user))}" title="Opens your email app with a message ready to send">Email reminder</a>`
+        : ''
+    }</div></td>
 </tr>`
   )
   .join('')}
@@ -664,7 +703,14 @@ ${rows
     wide: true,
     body: `<div class="page-head">
   <h1>Checked-out items</h1>
-  <a class="button secondary no-print" href="/admin/export.csv?scope=current">Export CSV</a>
+  <div class="actions-row no-print">
+    ${
+      allLink && allLink.length < 1900
+        ? `<a class="button secondary" href="${esc(allLink)}" title="Opens your email app with one message to everyone who is late">Email everyone late</a>`
+        : ''
+    }
+    <a class="button secondary" href="/admin/export.csv?scope=current">Export CSV</a>
+  </div>
 </div>
 <div class="stats">
   <div class="stat"><div class="value">${counts.out}</div><div class="label">Checked out</div></div>
