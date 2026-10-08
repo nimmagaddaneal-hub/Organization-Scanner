@@ -149,13 +149,13 @@ export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
   </div>
 </section>
 
-<section class="sheet section" id="compare">
-  <div class="section-head">
-    <span class="pill">Side by side</span>
-    <h2>That is theirs. <span class="accent">Ours is here, here and here.</span></h2>
-  </div>
-  <div class="compare">
-    <div class="compare-theirs">
+<section class="story" id="compare">
+  <div class="sheet section">
+    <div class="section-head">
+      <span class="pill">Side by side</span>
+      <h2>That is theirs. <span class="accent">Ours is here, here and here.</span></h2>
+    </div>
+    <div class="theirs-row">
       <div class="theirs-card">
         <span class="mono">THIS IS THEIRS</span>
         <h3>The paper sign-out sheet</h3>
@@ -175,24 +175,31 @@ export function homePage({ student = null, demoSent = false, demo = {} } = {}) {
         </ul>
       </div>
     </div>
-    <div class="compare-ours frame">
-      <span class="mono">OURS &middot; scroll to watch it land</span>
-      <div class="dg" id="diagram">
-        <canvas id="dg-canvas" aria-hidden="true"></canvas>
-        <span class="dg-tag dg-title" data-after="orb" data-gx="7" data-gy="7" data-z="42">Your organization</span>
-        <span class="dg-tag" data-after="left" data-gx="2" data-gy="12.8" data-z="0">Items</span>
-        <span class="dg-tag" data-after="right" data-gx="12.9" data-gy="3" data-z="0">Items</span>
-        <span class="dg-tag" data-after="front" data-gx="6.3" data-gy="13.6" data-z="0">Items</span>
-        <span class="dg-tag" data-after="slab" data-gx="14.3" data-gy="9.2" data-z="0">Dashboard</span>
-        <span class="dg-pin" data-after="right" data-gx="11" data-gy="3" data-z="19">1</span>
-        <span class="dg-pin" data-after="pad" data-gx="4.4" data-gy="8.6" data-z="0">2</span>
-        <span class="dg-pin" data-after="slab" data-gx="12" data-gy="9" data-z="13">3</span>
+  </div>
+  <div class="story-track">
+    <div class="story-stage">
+      <div class="dg-wrap frame">
+        <span class="mono">OURS &middot; scroll to watch it land</span>
+        <div class="dg" id="diagram">
+          <canvas id="dg-canvas" role="img" aria-label="A three-dimensional diagram: items, a student account link and a dashboard, all connected to your organization"></canvas>
+          <span class="dg-tag dg-title" data-after="orb" data-x="3.5" data-y="3.5" data-z="178">Your organization</span>
+          <span class="dg-tag" data-after="left" data-x="0.3" data-y="6.3" data-z="0">Items</span>
+          <span class="dg-tag" data-after="right" data-x="6.3" data-y="0.3" data-z="0">Items</span>
+          <span class="dg-tag" data-after="front" data-x="3.4" data-y="6.9" data-z="0">Items</span>
+          <span class="dg-tag" data-after="slab" data-x="6.9" data-y="4.6" data-z="0">Dashboard</span>
+          <span class="dg-pin" data-after="right" data-x="5.3" data-y="1.3" data-z="78">1</span>
+          <span class="dg-pin" data-after="pad" data-x="2.2" data-y="4.0" data-z="38">2</span>
+          <span class="dg-pin" data-after="slab" data-x="5.9" data-y="4.35" data-z="40">3</span>
+        </div>
       </div>
-      <ol class="callouts">
-        <li><strong>Here:</strong> a QR label on the item. Scan it and the form opens, with no app.</li>
-        <li><strong>And here:</strong> every check-out is tied to a student account, so you always know who has what.</li>
-        <li><strong>And here:</strong> one dashboard shows what is out and what is late. Each school sees only its own.</li>
-      </ol>
+      <div class="story-copy">
+        <div class="story-bar" aria-hidden="true"><span></span></div>
+        <ol class="callouts">
+          <li><strong>Here:</strong> a QR label on the item. Scan it and the form opens, with no app.</li>
+          <li><strong>And here:</strong> every check-out is tied to a student account, so you always know who has what.</li>
+          <li><strong>And here:</strong> one dashboard shows what is out and what is late. Each school sees only its own.</li>
+        </ol>
+      </div>
     </div>
   </div>
 </section>

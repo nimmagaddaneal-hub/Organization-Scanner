@@ -748,7 +748,8 @@ test('the home page has the animated diagram and its script, and no separate scr
   assert.match(home, /id="dg-canvas"/);
   assert.match(home, /Your organization/);
   assert.match(home, /<script src="\/diagram\.js"/);
-  assert.doesNotMatch(home, /id="system"|story-canvas|story\.js/);
+  assert.match(home, /class="story-track"/);
+  assert.doesNotMatch(home, /story-canvas|story\.js/);
   const script = await request('/diagram.js');
   assert.equal(script.status, 200);
   assert.match(await script.text(), /dg-canvas/);

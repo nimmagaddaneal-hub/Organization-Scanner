@@ -147,7 +147,7 @@ Without these settings, requests are still saved, but you are not told. The serv
 
 ## Home page animation
 
-The "ours" diagram in the Side by side section is animated as it scrolls into view: three item boxes, a dashboard and a platform drop onto an isometric ground, and finally the orb, your organization, lands on top. Each landing sends a pixelated ripple across the tiles. Labels and numbered pins appear as things land, and the matching line in the list below lights up. It is drawn on a small canvas (`public/diagram.js`) and scaled up without smoothing for the pixel look. Falling follows the scroll position, so scrolling back up lifts everything again. If the visitor's device asks for reduced motion, the finished scene is shown without animation. The orb in the first section (`public/hero.js`) can be dragged.
+The "ours" diagram in the Side by side section is drawn in 3D (isometric) on a canvas, and the section **locks in place** while you scroll through it. Scrolling drops three item boxes, a dashboard and a platform onto the ground, and finally the orb, your organization. Each landing sends a ripple across the ground mesh and a pulse ring; boxes hop and ride the waves. Labels and numbered pins appear as things land, and the matching line beside the diagram lights up. Falling follows the scroll position, so scrolling back up lifts everything again. If the visitor's device asks for reduced motion, the finished diagram is shown without animation or locking. The code is in `public/diagram.js`; the orb in the first section is `public/hero.js` and can be dragged.
 
 ## How it works for students
 
