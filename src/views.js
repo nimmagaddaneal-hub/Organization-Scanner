@@ -133,8 +133,9 @@ export function homePage({ demoSent = false, demo = {} } = {}) {
   <div class="hero-copy">
     <div class="hero-band"><h1>Check out anything<br><span class="accent">with a scan.</span></h1></div>
     <p class="lede">Scan the QR code on an item with your phone camera, fill in a short form, and it is logged. No app, no login.</p>
+    <div class="hero-actions"><a class="button primary" href="/scan">Scan an item</a></div>
     <form method="get" action="/find" class="find-form">
-      <label for="code-input">Have a code instead? Type or scan the code printed under the barcode.</label>
+      <label for="code-input">Or type the code printed under the barcode.</label>
       <div class="row">
         <input id="code-input" type="text" name="code" autocomplete="off" autocapitalize="none" maxlength="40" placeholder="e.g. 0b6539c17b7d" required>
         <button class="secondary">Find item</button>
@@ -1183,5 +1184,30 @@ export function ownerEraseStudentPage({ who, checkouts, accounts }) {
   }
   <p><a href="/owner/accounts">Cancel</a></p>
 </div>`,
+  });
+}
+
+// ---------- Scan page ----------
+
+export function scanPage() {
+  return layout({
+    title: 'Scan an item',
+    body: `<h1>Scan an item</h1>
+<p class="page-sub">Point your camera at the QR code on the item. It opens the check-out form.</p>
+<div class="card">
+  <div class="scan-box" id="scan-box">
+    <video id="scan-video" playsinline muted></video>
+    <div class="scan-frame" aria-hidden="true"></div>
+  </div>
+  <p id="scan-status" class="muted center" role="status" aria-live="polite">The camera needs your permission.</p>
+  <button class="primary" id="scan-start" type="button">Start the camera</button>
+</div>
+<form method="get" action="/find" class="card">
+  <label for="scan-code">Or type the code printed under the barcode
+    <input id="scan-code" type="text" name="code" autocomplete="off" autocapitalize="none" maxlength="40" required>
+  </label>
+  <button class="secondary">Find item</button>
+</form>
+<script src="/scan.js" defer></script>`,
   });
 }

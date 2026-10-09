@@ -174,6 +174,12 @@ export function createApp({
 
   app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
+  // The scan page uses a small open-source QR reader (jsQR) on phones that have no built-in one.
+  app.get('/scan', async (req, res) => res.send(views.scanPage()));
+  app.get('/vendor/jsQR.js', (req, res) =>
+    res.sendFile(fileURLToPath(new URL('../node_modules/jsqr/dist/jsQR.js', import.meta.url)))
+  );
+
   // Load the scanned item for every /i/:code route.
   app.param('code', async (req, res, next, code) => {
     let item;

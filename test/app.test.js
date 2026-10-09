@@ -896,3 +896,22 @@ test('owner: erase a student by email or ID, reset a staff password, delete a st
   assert.equal(item.school_id, 1);
 });
 
+
+test('the scan page, its script and the QR reader library are served', async () => {
+  const page = await request('/scan');
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /id="scan-video"/);
+  assert.match(html, /<script src="\/scan\.js"/);
+  assert.match(html, /action="\/find"/);
+  assert.match(await (await request('/')).text(), /href="\/scan"/);
+  const script = await request('/scan.js');
+  assert.equal(script.status, 200);
+  assert.match(await script.text(), /getUserMedia/);
+  const library = await request('/vendor/jsQR.js');
+  assert.equal(library.status, 200);
+  assert.match(await library.text(), /jsQR/);
+  // The typed code goes to the item.
+  const found = await request(`/find?code=${camera.code.toUpperCase()}`);
+  assert.equal(found.headers.get('location'), `/i/${camera.code}`);
+});
