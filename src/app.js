@@ -15,8 +15,8 @@ import {
   hashPassword,
   verifyPassword,
   sessionMaxAgeMs,
-  createRateLimiter,
 } from './auth.js';
+import { createDbRateLimiter } from './limiter.js';
 import * as views from './views.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -60,15 +60,15 @@ export function createApp({
   app.disable('x-powered-by');
   if (trustProxy) app.set('trust proxy', 1);
 
-  const loginLimiter = createRateLimiter(8, 15 * 60 * 1000);
-  const demoLimiter = createRateLimiter(5, 60 * 60 * 1000);
-  const waitlistLimiter = createRateLimiter(10, 60 * 60 * 1000);
-  const ownerLimiter = createRateLimiter(6, 15 * 60 * 1000);
+  const loginLimiter = createDbRateLimiter(db, 'loginLimiter', 8, 15 * 60 * 1000);
+  const demoLimiter = createDbRateLimiter(db, 'demoLimiter', 5, 60 * 60 * 1000);
+  const waitlistLimiter = createDbRateLimiter(db, 'waitlistLimiter', 10, 60 * 60 * 1000);
+  const ownerLimiter = createDbRateLimiter(db, 'ownerLimiter', 6, 15 * 60 * 1000);
   // Wrong guesses when returning without the phone that checked the item out. Per item and address.
-  const returnLimiter = createRateLimiter(5, 10 * 60 * 1000);
-  const signupLimiter = createRateLimiter(8, 15 * 60 * 1000);
+  const returnLimiter = createDbRateLimiter(db, 'returnLimiter', 5, 10 * 60 * 1000);
+  const signupLimiter = createDbRateLimiter(db, 'signupLimiter', 8, 15 * 60 * 1000);
   // Limits password guesses on the settings page, per account.
-  const accountLimiter = createRateLimiter(8, 15 * 60 * 1000);
+  const accountLimiter = createDbRateLimiter(db, 'accountLimiter', 8, 15 * 60 * 1000);
 
   app.use(async (req, res, next) => {
     res.set({
@@ -171,7 +171,7 @@ export function createApp({
     if (text(req.body?.website, 200)) return res.redirect(303, '/?demo=sent#demo');
 
     const key = `demo:${req.ip}`;
-    if (demoLimiter.isBlocked(key)) {
+    if (await demoLimiter.isBlocked(key)) {
       return res.status(429).send(homePage(req, { demo: { values, errors: ['Too many requests. Try again later.'] } }));
     }
     const errors = [];
@@ -180,7 +180,7 @@ export function createApp({
     if (!values.school) errors.push('Enter your school or organization.');
     if (errors.length) return res.status(400).send(homePage(req, { demo: { values, errors } }));
 
-    demoLimiter.recordFailure(key);
+    await demoLimiter.recordFailure(key);
     await db
       .prepare('INSERT INTO demo_requests (name, email, school, role, message, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(values.name, values.email, values.school, values.role, values.message, new Date().toISOString());
@@ -334,7 +334,7 @@ export function createApp({
     const email = text(req.body?.email, 254).toLowerCase();
     const fail = (message, status = 400) =>
       res.status(status).send(views.unavailablePage({ item, waitlistErrors: [message] }));
-    if (waitlistLimiter.isBlocked(req.ip)) return fail('Too many requests. Try again later.', 429);
+    if (await waitlistLimiter.isBlocked(req.ip)) return fail('Too many requests. Try again later.', 429);
     if (!name) return fail('Enter your name.');
     if (!EMAIL_PATTERN.test(email)) return fail('Enter a valid email address.');
     if (item.school_email_domain && !email.endsWith(`@${item.school_email_domain}`)) {
@@ -347,7 +347,7 @@ export function createApp({
       await db
         .prepare('INSERT INTO waitlist (item_id, name, email, created_at) VALUES (?, ?, ?, ?)')
         .run(item.id, name, email, new Date().toISOString());
-      waitlistLimiter.recordFailure(req.ip);
+      await waitlistLimiter.recordFailure(req.ip);
     }
     res.send(views.waitlistJoinedPage({ item }));
   });
@@ -389,7 +389,7 @@ export function createApp({
     let allowed = holdsItem(req, item, checkout);
 
     if (!allowed) {
-      if (returnLimiter.isBlocked(limiterKey)) {
+      if (await returnLimiter.isBlocked(limiterKey)) {
         return res
           .status(429)
           .send(views.unavailablePage({ item, errors: ['Too many attempts. Wait a few minutes or ask an officer for help.'] }));
@@ -401,7 +401,7 @@ export function createApp({
       const emailMatches = safeEqual(email, checkout.email);
       allowed = Boolean(studentId) && Boolean(email) && idMatches && emailMatches;
       if (!allowed) {
-        returnLimiter.recordFailure(limiterKey);
+        await returnLimiter.recordFailure(limiterKey);
         return res.status(403).send(
           views.unavailablePage({
             item,
@@ -412,7 +412,7 @@ export function createApp({
     }
 
     await markReturned.run(new Date().toISOString(), 'student', text(req.body?.return_notes, RETURN_NOTES_MAX), checkout.id);
-    returnLimiter.clear(limiterKey);
+    await returnLimiter.clear(limiterKey);
     res.clearCookie(returnCookieName(item), cookieOptions(req, { sameSite: 'lax', path: `/i/${item.code}` }));
     res.send(views.returnedPage({ item }));
   });
@@ -422,7 +422,7 @@ export function createApp({
   const admin = express.Router();
 
   const findUser = db.prepare(
-    `SELECT u.id, u.name, u.email, u.role, u.active, u.school_id, u.must_change, u.password_hash, s.name AS school_name
+    `SELECT u.id, u.name, u.email, u.role, u.active, u.school_id, u.must_change, u.password_hash, u.session_epoch, s.name AS school_name
        FROM users u JOIN schools s ON s.id = u.school_id
       WHERE u.id = ? AND u.active = 1`
   );
@@ -431,14 +431,14 @@ export function createApp({
   const currentUser = async (req) => {
     const session = readSession(req.cookies[ADMIN_COOKIE], sessionSecret);
     const row = session ? await findUser.get(session.id) : null;
-    if (!row || session.version !== passwordVersion(row.password_hash)) return null;
+    if (!row || session.version !== passwordVersion(row.password_hash, row.session_epoch)) return null;
     const { password_hash: _hash, ...user } = row;
     return user;
   };
-  const startSession = (req, res, userId, passwordHash) =>
+  const startSession = (req, res, userId, passwordHash, epoch = 0) =>
     res.cookie(
       ADMIN_COOKIE,
-      createSessionValue(userId, sessionSecret, undefined, passwordVersion(passwordHash)),
+      createSessionValue(userId, sessionSecret, undefined, passwordVersion(passwordHash, epoch)),
       cookieOptions(req, { sameSite: 'strict', path: '/admin', maxAge: sessionMaxAgeMs })
     );
   // Checked when the email is unknown, so a wrong email takes as long as a wrong password.
@@ -451,17 +451,17 @@ export function createApp({
 
   admin.post('/login', async (req, res) => {
     const email = text(req.body?.email, 254).toLowerCase();
-    if (loginLimiter.isBlocked(req.ip)) {
+    if (await loginLimiter.isBlocked(req.ip)) {
       return res.status(429).send(views.loginPage({ email, error: 'Too many attempts. Try again in 15 minutes.' }));
     }
     const account = await db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     const passwordOk = verifyPassword(req.body?.password ?? '', account ? account.password_hash : dummyHash);
     if (!account || !passwordOk || !account.active) {
-      loginLimiter.recordFailure(req.ip);
+      await loginLimiter.recordFailure(req.ip);
       return res.status(401).send(views.loginPage({ email, error: 'Wrong email or password.' }));
     }
-    loginLimiter.clear(req.ip);
-    startSession(req, res, account.id, account.password_hash);
+    await loginLimiter.clear(req.ip);
+    startSession(req, res, account.id, account.password_hash, account.session_epoch);
     res.redirect(303, '/admin');
   });
 
@@ -475,7 +475,7 @@ export function createApp({
     const signupCode = String(req.body?.signup_code ?? '');
     const fail = (status, errors) => res.status(status).send(views.signupPage({ values, errors }));
 
-    if (signupLimiter.isBlocked(req.ip)) return fail(429, ['Too many attempts. Try again in 15 minutes.']);
+    if (await signupLimiter.isBlocked(req.ip)) return fail(429, ['Too many attempts. Try again in 15 minutes.']);
 
     // The code decides the school and the role. Without a valid code nobody gets an account.
     let role = null;
@@ -491,7 +491,7 @@ export function createApp({
     if (password.length < 10) errors.push('Choose a password of 10 characters or more.');
     else if (password.length > 200) errors.push('Choose a password of 200 characters or fewer.');
     if (!role) {
-      signupLimiter.recordFailure(req.ip);
+      await signupLimiter.recordFailure(req.ip);
       errors.push('That sign-up code is not correct.');
     }
     if (errors.length) return fail(400, errors);
@@ -572,22 +572,22 @@ export function createApp({
     const fail = (status, message) =>
       res.status(status).send(views.settingsPage({ user: req.user, errors: { password: [message] } }));
     const limiterKey = `user:${req.user.id}`;
-    if (accountLimiter.isBlocked(limiterKey)) return fail(429, 'Too many attempts. Try again in 15 minutes.');
+    if (await accountLimiter.isBlocked(limiterKey)) return fail(429, 'Too many attempts. Try again in 15 minutes.');
 
     const newPassword = String(req.body?.new_password ?? '');
     if (!(await passwordMatches(req.user, req.body?.current_password))) {
-      accountLimiter.recordFailure(limiterKey);
+      await accountLimiter.recordFailure(limiterKey);
       return fail(403, 'Your current password is not correct.');
     }
     if (newPassword.length < 10) return fail(400, 'Choose a new password of 10 characters or more.');
     if (newPassword.length > 200) return fail(400, 'Choose a new password of 200 characters or fewer.');
     if (newPassword !== String(req.body?.confirm_password ?? '')) return fail(400, 'The new passwords do not match.');
 
-    accountLimiter.clear(limiterKey);
+    await accountLimiter.clear(limiterKey);
     // The new password signs out every other device, so the cookie is issued again here.
     const newHash = hashPassword(newPassword);
     await db.prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?').run(newHash, req.user.id);
-    startSession(req, res, req.user.id, newHash);
+    startSession(req, res, req.user.id, newHash, req.user.session_epoch);
     res.redirect(303, '/admin/settings?saved=password');
   });
 
@@ -605,8 +605,17 @@ export function createApp({
     if (password !== String(req.body?.confirm_password ?? '')) return fail(['The passwords do not match.']);
     const hash = hashPassword(password);
     await db.prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?').run(hash, req.user.id);
-    startSession(req, res, req.user.id, hash);
+    startSession(req, res, req.user.id, hash, req.user.session_epoch);
     res.redirect(303, '/admin');
+  });
+
+  // Ends every login of this account, on every device, and keeps this one.
+  admin.post('/settings/logout-everywhere', async (req, res) => {
+    const epoch = req.user.session_epoch + 1;
+    await db.prepare('UPDATE users SET session_epoch = ? WHERE id = ?').run(epoch, req.user.id);
+    const row = await db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    startSession(req, res, req.user.id, row.password_hash, epoch);
+    res.redirect(303, '/admin/settings?saved=loggedout');
   });
 
   admin.get('/settings/delete', async (req, res) => {
@@ -618,14 +627,14 @@ export function createApp({
       return res.status(409).send(views.deleteAccountPage({ user: req.user, lastAdmin: true }));
     }
     const limiterKey = `user:${req.user.id}`;
-    if (accountLimiter.isBlocked(limiterKey)) {
+    if (await accountLimiter.isBlocked(limiterKey)) {
       return res.status(429).send(views.deleteAccountPage({ user: req.user, errors: ['Too many attempts. Try again in 15 minutes.'] }));
     }
     if (!(await passwordMatches(req.user, req.body?.password))) {
-      accountLimiter.recordFailure(limiterKey);
+      await accountLimiter.recordFailure(limiterKey);
       return res.status(403).send(views.deleteAccountPage({ user: req.user, errors: ['That password is not correct.'] }));
     }
-    accountLimiter.clear(limiterKey);
+    await accountLimiter.clear(limiterKey);
     await removeAccount(req.user.id);
     res.clearCookie(ADMIN_COOKIE, cookieOptions(req, { sameSite: 'strict', path: '/admin' }));
     res.redirect(303, '/admin/login');
@@ -1058,14 +1067,14 @@ export function createApp({
   });
 
   owner.post('/login', async (req, res) => {
-    if (ownerLimiter.isBlocked(req.ip)) {
+    if (await ownerLimiter.isBlocked(req.ip)) {
       return res.status(429).send(views.ownerLoginPage({ error: 'Too many attempts. Try again in 15 minutes.' }));
     }
     if (!safeEqual(req.body?.password ?? '', ownerPassword)) {
-      ownerLimiter.recordFailure(req.ip);
+      await ownerLimiter.recordFailure(req.ip);
       return res.status(401).send(views.ownerLoginPage({ error: 'Wrong password.' }));
     }
-    ownerLimiter.clear(req.ip);
+    await ownerLimiter.clear(req.ip);
     res.cookie(
       OWNER_COOKIE,
       createSessionValue(1, ownerSecret),

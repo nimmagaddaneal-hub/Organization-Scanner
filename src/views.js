@@ -884,7 +884,7 @@ ${labels
 // ---------- Account pages ----------
 
 export function settingsPage({ user, notice = '', errors = {}, values = {} }) {
-  const notices = { name: 'Your name was updated.', password: 'Your password was changed.' };
+  const notices = { name: 'Your name was updated.', password: 'Your password was changed.', loggedout: 'You are logged out everywhere else. This device stays logged in.' };
   return layout({
     title: 'Settings',
     user,
@@ -922,6 +922,11 @@ ${notices[notice] ? `<div class="alert success" role="status">${notices[notice]}
     </label>
     <button class="primary">Change password</button>
   </form>
+</section>
+<section class="card inline-form">
+  <h2>Log out of all devices</h2>
+  <p class="muted small">Lost a phone, or used a shared computer? This ends every login of your account except this one.</p>
+  <form method="post" action="/admin/settings/logout-everywhere"><button class="secondary">Log out everywhere else</button></form>
 </section>
 <section class="card inline-form danger-zone">
   <h2>Delete my account</h2>

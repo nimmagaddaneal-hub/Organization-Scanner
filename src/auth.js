@@ -29,10 +29,10 @@ function sign(payload, secret) {
   return createHmac('sha256', secret).update(payload).digest('base64url');
 }
 
-// A short fingerprint of a password hash. A session only works while it matches, so changing or
-// resetting a password logs that account out everywhere else.
-export function passwordVersion(hash) {
-  return createHash('sha256').update(String(hash)).digest('hex').slice(0, 12);
+// A short fingerprint of a password hash and a log-out counter. A session only works while it matches, so
+// changing or resetting a password, or pressing "log out of all devices", logs the account out everywhere else.
+export function passwordVersion(hash, epoch = 0) {
+  return createHash('sha256').update(`${hash}:${epoch}`).digest('hex').slice(0, 12);
 }
 
 // The session cookie holds "userId.expiry.version.signature". Only the server can make a valid signature.
@@ -74,30 +74,3 @@ export function verifyPassword(password, stored) {
 }
 
 export const sessionMaxAgeMs = SESSION_HOURS * 60 * 60 * 1000;
-
-// Small in-memory limiter for password and return-verification guesses.
-export function createRateLimiter(maxAttempts, windowMs) {
-  const attempts = new Map();
-  return {
-    isBlocked(key) {
-      const entry = attempts.get(key);
-      if (!entry) return false;
-      if (entry.resetAt < Date.now()) {
-        attempts.delete(key);
-        return false;
-      }
-      return entry.count >= maxAttempts;
-    },
-    recordFailure(key) {
-      const entry = attempts.get(key);
-      if (!entry || entry.resetAt < Date.now()) {
-        attempts.set(key, { count: 1, resetAt: Date.now() + windowMs });
-      } else {
-        entry.count += 1;
-      }
-    },
-    clear(key) {
-      attempts.delete(key);
-    },
-  };
-}

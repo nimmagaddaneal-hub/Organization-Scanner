@@ -1169,3 +1169,57 @@ test('waiting list: join, staff email next in line, removed on check-out, scoped
   assert.equal((await rows()).length, 0);
   await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ? AND returned_at IS NULL').run(new Date().toISOString(), projector.id);
 });
+
+test('rate limits are kept in the database, so they survive a restart', async () => {
+  const { createDbRateLimiter } = await import('../src/limiter.js');
+  const first = createDbRateLimiter(db, 'persist-test', 3, 60000);
+  for (let i = 0; i < 3; i++) await first.recordFailure('k');
+  // A second limiter on the same database (a restarted server) still knows.
+  const second = createDbRateLimiter(db, 'persist-test', 3, 60000);
+  assert.equal(await second.isBlocked('k'), true);
+  assert.equal(await second.isBlocked('other-key'), false);
+  await second.clear('k');
+  assert.equal(await first.isBlocked('k'), false);
+  // Old counts expire.
+  await db.prepare('INSERT OR REPLACE INTO rate_limits (key, count, reset_at) VALUES (?, 99, ?)').run('persist-test:old', Date.now() - 1);
+  assert.equal(await first.isBlocked('old'), false);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM rate_limits WHERE key = 'persist-test:old'").get()).n, 0);
+
+  // A fresh copy of the whole app, on the same database, is still limited.
+  await db.prepare('INSERT OR REPLACE INTO rate_limits (key, count, reset_at) VALUES (?, 99, ?)').run('demoLimiter:demo:127.0.0.1', Date.now() + 60000);
+  const restarted = createApp({ db, sessionSecret: 'test-secret' });
+  const restartedServer = await new Promise((resolve) => {
+    const started = restarted.listen(0, '127.0.0.1', () => resolve(started));
+  });
+  const response = await fetch(`http://127.0.0.1:${restartedServer.address().port}/demo`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ name: 'A', email: 'a@b.co', school: 'S' }),
+    redirect: 'manual',
+  });
+  assert.equal(response.status, 429);
+  restartedServer.close();
+  await db.prepare("DELETE FROM rate_limits WHERE key LIKE 'demoLimiter:%'").run();
+});
+
+test('log out of all devices ends every other login but keeps this one', async () => {
+  const account = { name: 'Many Devices', email: 'manydevices@example.edu', password: 'long-enough-password' };
+  const laptop = cookiesFrom(await signUp(account, TEACHER_CODE));
+  const phone = cookiesFrom(await request('/admin/login', { method: 'POST', form: { email: account.email, password: account.password } }));
+  assert.equal((await request('/admin/items', { cookie: phone })).status, 200);
+  assert.match(await (await request('/admin/settings', { cookie: laptop })).text(), /Log out of all devices/);
+
+  const out = await request('/admin/settings/logout-everywhere', { method: 'POST', cookie: laptop });
+  assert.equal(out.status, 303);
+  assert.equal((await request('/admin/items', { cookie: phone })).status, 302);
+  assert.equal((await request('/admin/items', { cookie: laptop })).status, 302);
+  const stillIn = cookiesFrom(out);
+  assert.equal((await request('/admin/items', { cookie: stillIn })).status, 200);
+  assert.match(await (await request('/admin/settings?saved=loggedout', { cookie: stillIn })).text(), /logged out everywhere else/);
+  // Logging in again works, and a second round of the button ends the new login too.
+  const again = cookiesFrom(await request('/admin/login', { method: 'POST', form: { email: account.email, password: account.password } }));
+  assert.equal((await request('/admin/items', { cookie: again })).status, 200);
+  await request('/admin/settings/logout-everywhere', { method: 'POST', cookie: stillIn });
+  assert.equal((await request('/admin/items', { cookie: again })).status, 302);
+  assert.equal((await request('/admin/settings/logout-everywhere', { method: 'POST' })).status, 401);
+});

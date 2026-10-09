@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS waitlist (
 );
 CREATE INDEX IF NOT EXISTS waitlist_by_item ON waitlist(item_id);
 
+-- Counts of recent attempts (wrong passwords, form submissions), kept so limits survive a restart.
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key      TEXT PRIMARY KEY,
+  count    INTEGER NOT NULL,
+  reset_at INTEGER NOT NULL
+);
+
 -- Schools that asked for a demo from the home page.
 CREATE TABLE IF NOT EXISTS demo_requests (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,6 +167,12 @@ export async function openDb({ url, authToken }) {
   }
   if (!checkoutExtras.includes('original_due_date')) {
     await client.execute('ALTER TABLE checkouts ADD COLUMN original_due_date TEXT');
+  }
+
+  // "Log out of all devices" raises this number. Sessions only work for the number they were made with.
+  const userColumnsNow = (await db.prepare('PRAGMA table_info(users)').all()).map((column) => column.name);
+  if (!userColumnsNow.includes('session_epoch')) {
+    await client.execute('ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0');
   }
 
   // A temporary password set by someone else must be changed at the next login.
