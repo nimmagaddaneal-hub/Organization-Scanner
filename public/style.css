@@ -445,11 +445,8 @@ td form { margin: 0; }
 .hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 @media (max-width: 600px) { .two-col { grid-template-columns: 1fr; } }
-.hero-actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 22px 32px 0; }
-@media (max-width: 860px) { .hero-actions { padding-left: 20px; padding-right: 20px; } }
 .find-form { padding-top: 22px; }
 .stack { display: grid; gap: 10px; margin-top: 4px; }
-.account-box { padding: 12px 14px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
 .demo-note { max-width: 52ch; margin: 14px auto 0; }
 .demo-card { max-width: 720px; margin: 0 auto; padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
 .demo-form button.primary { width: 100%; }
@@ -523,7 +520,6 @@ dl.codes dd { margin: 0; }
 .temp-password { margin: 8px 0 16px; }
 .temp-password code { font-size: 1.5rem; padding: 8px 14px; letter-spacing: 0.06em; user-select: all; }
 
-.late-badge { padding: 2px 9px; border-radius: 999px; background: var(--error-text); color: #fff; font-size: 0.78rem; font-weight: 700; text-decoration: none; }
 
 .actions-row { display: flex; gap: 8px; flex-wrap: wrap; }
 

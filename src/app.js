@@ -21,9 +21,8 @@ import * as views from './views.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const STUDENT_COOKIE = 'student_session';
-const STUDENT_SESSION_HOURS = 24 * 30;
-const STUDENT_PHONE_PATTERN = /^[0-9+().\-\s]{7,30}$/;
+const RETURN_COOKIE_DAYS = 180;
+const PHONE_PATTERN = /^[0-9+().\-\s]{7,30}$/;
 
 function todayLocal() {
   // en-CA formats as YYYY-MM-DD in the server's time zone (set TZ to change it).
@@ -64,10 +63,8 @@ export function createApp({
   const loginLimiter = createRateLimiter(8, 15 * 60 * 1000);
   const demoLimiter = createRateLimiter(5, 60 * 60 * 1000);
   const ownerLimiter = createRateLimiter(6, 15 * 60 * 1000);
-  // A whole school can share one network address, so student limits are per account, and the per-address limits are loose.
-  const studentEmailLimiter = createRateLimiter(8, 15 * 60 * 1000);
-  const studentIpLimiter = createRateLimiter(200, 15 * 60 * 1000);
-  const studentSignupLimiter = createRateLimiter(200, 60 * 60 * 1000);
+  // Wrong guesses when returning without the phone that checked the item out. Per item and address.
+  const returnLimiter = createRateLimiter(5, 10 * 60 * 1000);
   const signupLimiter = createRateLimiter(8, 15 * 60 * 1000);
   // Limits password guesses on the settings page, per account.
   const accountLimiter = createRateLimiter(8, 15 * 60 * 1000);
@@ -117,181 +114,20 @@ export function createApp({
     'UPDATE checkouts SET returned_at = ?, returned_by = ? WHERE id = ? AND returned_at IS NULL'
   );
 
-  // Return links made before student accounts existed used a cookie on the phone. They still work.
+  // At check-out the phone saves a private cookie for that item, so a later scan can offer "Return this item".
   const returnCookieName = (item) => `rt_${item.code}`;
   const holdsItem = (req, item, checkout) =>
     Boolean(checkout) &&
     Boolean(req.cookies[returnCookieName(item)]) &&
     safeEqual(req.cookies[returnCookieName(item)], checkout.return_token);
 
-  // ---------- Student accounts ----------
-
-  // Student cookies are signed with their own secret, so an admin cookie is never accepted as a student one.
-  const studentSecret = `${sessionSecret}:student`;
-  const findStudent = db.prepare(
-    'SELECT id, name, student_id, email, phone, must_change, password_hash FROM students WHERE id = ? AND active = 1'
-  );
-
-  app.use(async (req, res, next) => {
-    try {
-      req.student = null;
-      const session = readSession(req.cookies[STUDENT_COOKIE], studentSecret);
-      const row = session ? await findStudent.get(session.id) : null;
-      // The session only works for the password it was made with.
-      if (row && session.version === passwordVersion(row.password_hash)) {
-        const { password_hash: _hash, ...student } = row;
-        // How many items this student has that are past their return date, for the warning in the header.
-        student.overdue = (
-          await db
-            .prepare('SELECT COUNT(*) AS count FROM checkouts WHERE student_account_id = ? AND returned_at IS NULL AND due_date < ?')
-            .get(student.id, todayLocal())
-        ).count;
-        req.student = student;
-      }
-      // A student with a temporary password must choose their own before doing anything else.
-      if (req.student?.must_change && !['/student/new-password', '/student/logout'].includes(req.path)) {
-        return res.redirect(303, '/student/new-password');
-      }
-      next();
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  const startStudentSession = (req, res, studentId, passwordHash) =>
-    res.cookie(
-      STUDENT_COOKIE,
-      createSessionValue(studentId, studentSecret, STUDENT_SESSION_HOURS, passwordVersion(passwordHash)),
-      cookieOptions(req, { sameSite: 'lax', path: '/', maxAge: STUDENT_SESSION_HOURS * 60 * 60 * 1000 })
-    );
-
-  // Only our own item pages and the account page are valid places to go after logging in.
-  const safeNext = (value) => (/^\/i\/[a-z0-9]{1,40}$/.test(String(value)) || value === '/account' ? value : '/account');
-  const studentDummyHash = hashPassword(randomBytes(16).toString('hex'));
-
-  app.get('/student/login', async (req, res) => {
-    const next = safeNext(req.query.next);
-    if (req.student) return res.redirect(next);
-    res.send(views.studentLoginPage({ next }));
-  });
-
-  app.post('/student/login', async (req, res) => {
-    const next = safeNext(req.body?.next);
-    const email = text(req.body?.email, 254).toLowerCase();
-    if (studentEmailLimiter.isBlocked(email) || studentIpLimiter.isBlocked(req.ip)) {
-      return res.status(429).send(views.studentLoginPage({ next, email, error: 'Too many attempts. Try again in 15 minutes.' }));
-    }
-    const account = await db.prepare('SELECT * FROM students WHERE email = ?').get(email);
-    const passwordOk = verifyPassword(req.body?.password ?? '', account ? account.password_hash : studentDummyHash);
-    if (!account || !passwordOk || !account.active) {
-      studentEmailLimiter.recordFailure(email);
-      studentIpLimiter.recordFailure(req.ip);
-      return res.status(401).send(views.studentLoginPage({ next, email, error: 'Wrong email or password.' }));
-    }
-    studentEmailLimiter.clear(email);
-    startStudentSession(req, res, account.id, account.password_hash);
-    res.redirect(303, next);
-  });
-
-  app.get('/student/signup', async (req, res) => {
-    const next = safeNext(req.query.next);
-    if (req.student) return res.redirect(next);
-    res.send(views.studentSignupPage({ next }));
-  });
-
-  app.post('/student/signup', async (req, res) => {
-    const next = safeNext(req.body?.next);
-    const values = {
-      name: text(req.body?.name, 100),
-      student_id: text(req.body?.student_id, 20),
-      email: text(req.body?.email, 254).toLowerCase(),
-      phone: text(req.body?.phone, 30),
-    };
-    const password = String(req.body?.password ?? '');
-    const fail = (status, errors) => res.status(status).send(views.studentSignupPage({ next, values, errors }));
-
-    if (studentSignupLimiter.isBlocked(req.ip)) return fail(429, ['Too many sign-ups from this network. Try again later.']);
-
-    const errors = [];
-    if (!values.name) errors.push('Enter your full name.');
-    if (!values.student_id) errors.push('Enter your student ID number (lunch number).');
-    else if (!/^[A-Za-z0-9-]+$/.test(values.student_id)) errors.push('Student ID can only contain letters, numbers and dashes.');
-    if (!values.email) errors.push('Enter your school email.');
-    else if (!EMAIL_PATTERN.test(values.email)) errors.push('Enter a valid email address.');
-    if (values.phone && !STUDENT_PHONE_PATTERN.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
-    if (password.length < 8) errors.push('Choose a password of 8 characters or more.');
-    else if (password.length > 200) errors.push('Choose a password of 200 characters or fewer.');
-    else if (password !== String(req.body?.confirm_password ?? '')) errors.push('The passwords do not match.');
-    if (errors.length) return fail(400, errors);
-
-    let studentAccountId;
-    const passwordHash = hashPassword(password);
-    try {
-      const result = await db
-        .prepare('INSERT INTO students (name, student_id, email, phone, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(values.name, values.student_id, values.email, values.phone, passwordHash, new Date().toISOString());
-      studentAccountId = result.lastInsertRowid;
-    } catch (error) {
-      if (String(error.message).includes('UNIQUE')) return fail(400, ['An account with this email already exists. Log in instead.']);
-      throw error;
-    }
-    studentSignupLimiter.recordFailure(req.ip);
-    startStudentSession(req, res, studentAccountId, passwordHash);
-    res.redirect(303, next);
-  });
-
-  // Choosing a new password after someone reset it for you.
-  app.get('/student/new-password', async (req, res) => {
-    if (!req.student) return res.redirect('/student/login');
-    res.send(views.newPasswordPage({ student: req.student, action: '/student/new-password', minLength: 8 }));
-  });
-
-  app.post('/student/new-password', async (req, res) => {
-    if (!req.student) return res.redirect(303, '/student/login');
-    const password = String(req.body?.password ?? '');
-    const fail = (errors) =>
-      res.status(400).send(views.newPasswordPage({ student: req.student, action: '/student/new-password', minLength: 8, errors }));
-    if (password.length < 8) return fail(['Choose a password of 8 characters or more.']);
-    if (password.length > 200) return fail(['Choose a password of 200 characters or fewer.']);
-    if (password !== String(req.body?.confirm_password ?? '')) return fail(['The passwords do not match.']);
-    const hash = hashPassword(password);
-    await db.prepare('UPDATE students SET password_hash = ?, must_change = 0 WHERE id = ?').run(hash, req.student.id);
-    startStudentSession(req, res, req.student.id, hash);
-    res.redirect(303, '/account');
-  });
-
-  app.post('/student/logout', async (req, res) => {
-    res.clearCookie(STUDENT_COOKIE, cookieOptions(req, { sameSite: 'lax', path: '/' }));
-    res.redirect(303, '/');
-  });
-
-  app.get('/account', async (req, res) => {
-    if (!req.student) return res.redirect('/student/login?next=/account');
-    const rows = await db
-      .prepare(
-        `SELECT c.*, i.name AS item_name, i.code AS item_code
-           FROM checkouts c JOIN items i ON i.id = c.item_id
-          WHERE c.student_account_id = ?
-          ORDER BY c.checked_out_at DESC`
-      )
-      .all(req.student.id);
-    res.send(
-      views.accountPage({
-        student: req.student,
-        open: rows.filter((row) => !row.returned_at),
-        history: rows.filter((row) => row.returned_at),
-        today: todayLocal(),
-      })
-    );
-  });
-
   // ---------- Demo requests from other schools ----------
 
-  const homePage = (req, extra = {}) => views.homePage({ student: req.student, ...extra });
+  const homePage = (req, extra = {}) => views.homePage(extra);
 
   app.get('/', async (req, res) => res.send(homePage(req, { demoSent: req.query.demo === 'sent' })));
 
-  app.get('/privacy', async (req, res) => res.send(views.privacyPage({ student: req.student })));
+  app.get('/privacy', async (req, res) => res.send(views.privacyPage({})));
 
   app.post('/demo', async (req, res) => {
     const values = {
@@ -352,7 +188,6 @@ export function createApp({
           title: 'Item not found',
           message: 'This code does not match an item. Ask an organization officer for help.',
           status: 'warning',
-          student: req.student,
         })
       );
     }
@@ -360,92 +195,122 @@ export function createApp({
     next();
   });
 
-  const isHolder = (req, item, checkout) =>
-    holdsItem(req, item, checkout) || (Boolean(req.student) && checkout.student_account_id === req.student.id);
-
   const formPage = (req, extra = {}) =>
-    views.checkoutFormPage({
-      item: req.item,
-      student: req.student,
-      today: todayLocal(),
-      now: new Date().toISOString(),
-      ...extra,
-    });
+    views.checkoutFormPage({ item: req.item, today: todayLocal(), now: new Date().toISOString(), ...extra });
 
   app.get('/i/:code', async (req, res) => {
-    const { item, student } = req;
+    const { item } = req;
     const checkout = await findOpenCheckout.get(item.id);
-    if (!checkout) {
-      if (!student) return res.send(views.loginRequiredPage({ item }));
-      return res.send(formPage(req));
+    if (!checkout) return res.send(formPage(req));
+    if (holdsItem(req, item, checkout)) {
+      return res.send(views.ownCheckoutPage({ item, checkout, justCheckedOut: req.query.done === '1', today: todayLocal() }));
     }
-    if (isHolder(req, item, checkout)) {
-      return res.send(views.ownCheckoutPage({ item, student, checkout, justCheckedOut: req.query.done === '1', today: todayLocal() }));
-    }
-    res.send(views.unavailablePage({ item, student }));
+    res.send(views.unavailablePage({ item }));
   });
 
   app.post('/i/:code/checkout', async (req, res) => {
-    const { item, student } = req;
-    if (!student) return res.redirect(303, `/student/login?next=/i/${item.code}`);
-
+    const { item } = req;
     const values = {
+      student_name: text(req.body?.student_name, 100),
+      student_id: text(req.body?.student_id, 20),
+      email: text(req.body?.email, 254).toLowerCase(),
       phone: text(req.body?.phone, 30),
       due_date: text(req.body?.due_date, 10),
       purpose: text(req.body?.purpose, 500),
     };
+
     const errors = [];
     const domain = item.school_email_domain;
-    if (domain && !student.email.endsWith(`@${domain}`)) {
-      errors.push(`This item belongs to ${item.school_name}. Use a school email ending in @${domain}: sign up with one.`);
+    if (!values.student_name) errors.push('Enter your full name.');
+    if (!values.student_id) errors.push('Enter your student ID number (lunch number).');
+    else if (!/^[A-Za-z0-9-]+$/.test(values.student_id)) {
+      errors.push('Student ID can only contain letters, numbers and dashes.');
     }
-    if (values.phone && !STUDENT_PHONE_PATTERN.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
+    if (!values.email) errors.push('Enter your school email.');
+    else if (!EMAIL_PATTERN.test(values.email)) errors.push('Enter a valid email address.');
+    else if (domain && !values.email.endsWith(`@${domain}`)) {
+      errors.push(`Use your school email ending in @${domain}.`);
+    }
+    if (values.phone && !PHONE_PATTERN.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
     if (!values.due_date) errors.push('Choose an expected return date.');
     else if (!isRealDate(values.due_date)) errors.push('Enter a valid return date.');
     else if (values.due_date < todayLocal()) errors.push('The return date cannot be in the past.');
+
     if (errors.length) return res.status(400).send(formPage(req, { values, errors }));
 
+    const returnToken = randomBytes(24).toString('hex');
     try {
-      // Name, ID and email are copied from the account, so the record still reads correctly if the account changes later.
       await db
         .prepare(
           `INSERT INTO checkouts
-             (item_id, student_name, student_id, email, phone, purpose, checked_out_at, due_date, return_token, student_account_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             (item_id, student_name, student_id, email, phone, purpose, checked_out_at, due_date, return_token)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           item.id,
-          student.name,
-          student.student_id,
-          student.email,
+          values.student_name,
+          values.student_id,
+          values.email,
           values.phone,
           values.purpose,
           new Date().toISOString(),
           values.due_date,
-          randomBytes(24).toString('hex'),
-          student.id
+          returnToken
         );
     } catch (error) {
       // The unique index rejects a second open check-out for the same item.
-      if (String(error.message).includes('UNIQUE')) {
-        return res.status(409).send(views.unavailablePage({ item, student }));
-      }
+      if (String(error.message).includes('UNIQUE')) return res.status(409).send(views.unavailablePage({ item }));
       throw error;
     }
+
+    // Remember on this phone that this student holds the item, so a later scan offers "Return".
+    res.cookie(
+      returnCookieName(item),
+      returnToken,
+      cookieOptions(req, {
+        sameSite: 'lax',
+        path: `/i/${item.code}`,
+        maxAge: RETURN_COOKIE_DAYS * 24 * 60 * 60 * 1000,
+      })
+    );
     res.redirect(303, `/i/${item.code}?done=1`);
   });
 
   app.post('/i/:code/return', async (req, res) => {
-    const { item, student } = req;
+    const { item } = req;
     const checkout = await findOpenCheckout.get(item.id);
     if (!checkout) return res.redirect(303, `/i/${item.code}`);
-    if (!isHolder(req, item, checkout)) {
-      if (!student) return res.redirect(303, `/student/login?next=/i/${item.code}`);
-      return res.status(403).send(views.unavailablePage({ item, student }));
+
+    const limiterKey = `${req.ip}:${item.id}`;
+    let allowed = holdsItem(req, item, checkout);
+
+    if (!allowed) {
+      if (returnLimiter.isBlocked(limiterKey)) {
+        return res
+          .status(429)
+          .send(views.unavailablePage({ item, errors: ['Too many attempts. Wait a few minutes or ask an officer for help.'] }));
+      }
+      const studentId = text(req.body?.student_id, 20);
+      const email = text(req.body?.email, 254).toLowerCase();
+      // Check both fields every time, and give one generic message, so the form reveals nothing.
+      const idMatches = safeEqual(studentId.toLowerCase(), checkout.student_id.toLowerCase());
+      const emailMatches = safeEqual(email, checkout.email);
+      allowed = Boolean(studentId) && Boolean(email) && idMatches && emailMatches;
+      if (!allowed) {
+        returnLimiter.recordFailure(limiterKey);
+        return res.status(403).send(
+          views.unavailablePage({
+            item,
+            errors: ['Those details do not match this check-out. Check them, or ask an officer for help.'],
+          })
+        );
+      }
     }
+
     await markReturned.run(new Date().toISOString(), 'student', checkout.id);
+    returnLimiter.clear(limiterKey);
     res.clearCookie(returnCookieName(item), cookieOptions(req, { sameSite: 'lax', path: `/i/${item.code}` }));
-    res.send(views.returnedPage({ item, student }));
+    res.send(views.returnedPage({ item }));
   });
 
   // ---------- Staff routes (admins and teachers) ----------
@@ -861,28 +726,6 @@ export function createApp({
     );
   });
 
-  // Students who have borrowed from this school. Student accounts are shared, so other schools' data is never shown.
-  admin.get('/students', requireAdmin, async (req, res) => {
-    const q = text(req.query.q, 100);
-    const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
-    const students = await db
-      .prepare(
-        `SELECT s.id, s.name, s.student_id, s.email,
-                COUNT(*) AS total,
-                SUM(CASE WHEN c.returned_at IS NULL THEN 1 ELSE 0 END) AS open,
-                MAX(c.checked_out_at) AS last_seen
-           FROM students s
-           JOIN checkouts c ON c.student_account_id = s.id
-           JOIN items i ON i.id = c.item_id
-          WHERE i.school_id = ?
-          ${q ? "AND (s.name LIKE ? ESCAPE '\\' OR s.email LIKE ? ESCAPE '\\' OR s.student_id LIKE ? ESCAPE '\\')" : ''}
-          GROUP BY s.id
-          ORDER BY s.name COLLATE NOCASE`
-      )
-      .all(...[req.user.school_id, ...(q ? [like, like, like] : [])]);
-    res.send(views.studentsPage({ user: req.user, students, q }));
-  });
-
   admin.get('/people', requireAdmin, async (req, res) => {
     const people = await db
       .prepare('SELECT id, name, email, role, active, created_at FROM users WHERE school_id = ? ORDER BY role, name COLLATE NOCASE')
@@ -922,22 +765,6 @@ export function createApp({
     const temporary = temporaryPassword();
     await db.prepare('UPDATE users SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(temporary), person.id);
     res.send(views.tempPasswordPage({ user: req.user, person, temporary, back: '/admin/people', backLabel: 'People' }));
-  });
-
-  admin.post('/students/:id/reset-password', requireAdmin, async (req, res) => {
-    // Only for students who have borrowed from this school.
-    const person = await db
-      .prepare(
-        `SELECT s.id, s.name, s.email FROM students s
-          WHERE s.id = ? AND EXISTS (
-            SELECT 1 FROM checkouts c JOIN items i ON i.id = c.item_id
-             WHERE c.student_account_id = s.id AND i.school_id = ?)`
-      )
-      .get(Number(req.params.id), req.user.school_id);
-    if (!person) return res.status(404).type('text').send('Student not found');
-    const temporary = temporaryPassword();
-    await db.prepare('UPDATE students SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(temporary), person.id);
-    res.send(views.tempPasswordPage({ user: req.user, person, temporary, back: '/admin/students', backLabel: 'Students' }));
   });
 
   admin.post('/people/:id/active', requireAdmin, async (req, res) => {
@@ -1056,11 +883,10 @@ export function createApp({
     res.redirect(303, '/owner/demos');
   });
 
-  // Find any staff or student account, to reset a password or erase it.
+  // Find a staff account, to help with a lost password.
   owner.get('/accounts', async (req, res) => {
     const q = text(req.query.q, 100);
     let staff = [];
-    let students = [];
     if (q) {
       const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
       staff = await db
@@ -1070,14 +896,8 @@ export function createApp({
             WHERE u.email LIKE ? ESCAPE '\\' OR u.name LIKE ? ESCAPE '\\' ORDER BY u.name COLLATE NOCASE LIMIT 50`
         )
         .all(like, like);
-      students = await db
-        .prepare(
-          `SELECT id, name, student_id, email, active FROM students
-            WHERE email LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR student_id LIKE ? ESCAPE '\\' ORDER BY name COLLATE NOCASE LIMIT 50`
-        )
-        .all(like, like, like);
     }
-    res.send(views.ownerAccountsPage({ q, staff, students, notice: text(req.query.saved, 20) }));
+    res.send(views.ownerAccountsPage({ q, staff, notice: text(req.query.saved, 20) }));
   });
 
   owner.post('/accounts/staff/:id/reset-password', async (req, res) => {
@@ -1088,33 +908,28 @@ export function createApp({
     res.send(views.tempPasswordPage({ owner: true, person, temporary, back: '/owner/accounts', backLabel: 'accounts' }));
   });
 
-  owner.post('/accounts/students/:id/reset-password', async (req, res) => {
-    const person = await db.prepare('SELECT id, name, email FROM students WHERE id = ?').get(Number(req.params.id));
-    if (!person) return res.status(404).type('text').send('Student not found');
-    const temporary = temporaryPassword();
-    await db.prepare('UPDATE students SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(temporary), person.id);
-    res.send(views.tempPasswordPage({ owner: true, person, temporary, back: '/owner/accounts', backLabel: 'accounts' }));
-  });
-
-  owner.get('/accounts/students/:id/erase', async (req, res) => {
-    const person = await db.prepare('SELECT id, name, email FROM students WHERE id = ?').get(Number(req.params.id));
-    if (!person) return res.status(404).type('text').send('Student not found');
+  // Erase one student's details from every check-out, matched by their email or student ID.
+  const studentMatch = (who) => ({ who: text(who, 254).toLowerCase() });
+  owner.get('/students/erase', async (req, res) => {
+    const { who } = studentMatch(req.query.who);
+    if (!who) return res.redirect('/owner/accounts');
+    const found = await db
+      .prepare('SELECT COUNT(*) AS count FROM checkouts WHERE lower(email) = ? OR lower(student_id) = ?')
+      .get(who, who);
+    const accounts = await db.prepare('SELECT COUNT(*) AS count FROM students WHERE lower(email) = ? OR lower(student_id) = ?').get(who, who);
     res.send(
-      views.ownerConfirmPage({
-        title: `Erase ${person.name}`,
-        message: `Erases the account (${person.email}) and removes the name, ID, email, phone and notes from every check-out they made. The check-outs stay as anonymous history. This cannot be undone.`,
-        action: `/owner/accounts/students/${person.id}/erase`,
-        button: 'Erase student for good',
-      })
+      views.ownerEraseStudentPage({ who, checkouts: found.count, accounts: accounts.count })
     );
   });
 
-  owner.post('/accounts/students/:id/erase', async (req, res) => {
-    const id = Number(req.params.id);
+  owner.post('/students/erase', async (req, res) => {
+    const { who } = studentMatch(req.body?.who);
+    if (!who) return res.redirect(303, '/owner/accounts');
     await db
-      .prepare("UPDATE checkouts SET student_name = '(erased)', student_id = '', email = '', phone = '', purpose = '', student_account_id = NULL WHERE student_account_id = ?")
-      .run(id);
-    await db.prepare('DELETE FROM students WHERE id = ?').run(id);
+      .prepare("UPDATE checkouts SET student_name = '(erased)', student_id = '', email = '', phone = '', purpose = '', student_account_id = NULL WHERE lower(email) = ? OR lower(student_id) = ?")
+      .run(who, who);
+    // Student accounts from the time when they existed.
+    await db.prepare('DELETE FROM students WHERE lower(email) = ? OR lower(student_id) = ?').run(who, who);
     res.redirect(303, '/owner/accounts?saved=erased');
   });
 

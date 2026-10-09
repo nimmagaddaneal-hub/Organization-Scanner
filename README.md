@@ -2,7 +2,7 @@
 
 A scan-to-check-out system for a school organization.
 
-- **Students** create an account once (name, ID or lunch number, school email, password). Then they scan the QR code on an item with their phone camera, pick a return date, and the item is logged under their account. No app to install.
+- **Students** scan the QR code on an item with their phone camera, fill out a short form (name, ID or lunch number, school email, return date), and the item is logged as checked out. No app and no login or account.
 - **Teachers** sign up for an account, list their own items, and get a printable QR code and barcode for each one right away. They see check-outs of their own items only.
 - **Administrators** sign up for an account and see everything: all check-outs, all items, history, CSV export, code labels, and the list of staff accounts.
 
@@ -88,8 +88,8 @@ For the person who runs the site, not for any school. Set `OWNER_PASSWORD` (12 c
 
 - **Schools:** add a school, see its admin and teacher sign-up codes, make new codes, rename it, set its student email domain. Send the admin code to a school after its demo. (The first school's codes come from your settings.) The command `npm run schools` does the same from a terminal.
 - **Demo requests:** every request from the home page, with Mark contacted and Delete. School administrators never see these.
-- **Find account:** search staff and students by name, email or student ID. Reset a lost password, delete a staff account, or **erase a student**: the account is deleted and the name, ID, email, phone and notes are removed from all of that student's check-outs, which stay as anonymous history.
-- The owner login is separate from every staff and student login, and lasts 8 hours.
+- **Find account:** search staff by name or email, reset a lost password, or delete a staff account. **Erase a student's records:** enter a student's email or student ID. Every check-out with it loses the name, ID, email, phone and notes (it stays as anonymous history), and any old student account is deleted.
+- The owner login is separate from every staff login, and lasts 8 hours.
 
 ## Staff accounts
 
@@ -127,19 +127,15 @@ To change an item, click **Edit**. Unchecking **Active** retires the item: its c
 
 To remove an item for good, click **Delete** and confirm. This also deletes the item's check-out records and cannot be undone, so export the CSV from **History** first if you need them. An item that is checked out cannot be deleted until it is marked returned. Prefer retiring when you want to keep the history. Teachers can edit only items they listed. The sample items belong to the organization, so only admins see them.
 
-## Student accounts
+## Students
 
-- Students sign up at `/student/signup` (the home page has a button). No code is needed: students only ever see their own items.
-- At check-out the form is filled in from the account (name, ID, email). The student adds a return date and optional phone and notes.
-- Scanning an item while logged out asks the student to log in or sign up, then returns them to that item.
-- **My items** (`/account`) lists what a student has out, with a Return button, plus their history.
-- Student accounts are shared by all schools. Staff see the account on each check-out (an **Account** tag). An admin's **Students** page lists only the students who have borrowed from **their** school, with how many items each has out.
-- A student returns an item by being logged in as the person who checked it out. From another phone: log in there, then scan.
-- Check-outs made before this feature have no account. Admins can mark those returned on the dashboard.
-- Student logins last 30 days. After 8 wrong passwords for one account, that account is blocked for 15 minutes. Other students are not affected, so a whole school sharing one network is fine.
-- **Lost password (no email needed):** an administrator opens **Students** and presses **Reset password**, which works for students who have borrowed from their school. A student who never borrowed anything can ask the site owner (see **The owner page**). The temporary password works the same way as for staff: shown once, and the student must choose their own at the next login.
-- A student with an item past its return date sees a red **late** badge in the header, a warning on **My items**, and a warning on that item's page.
-- A school can require its own email domain (`SCHOOL_EMAIL_DOMAIN` for the first school, `--domain` when adding another). The check happens at check-out: a student whose email does not match cannot borrow that school's items.
+- There are **no student accounts**. A student types their details into the form at each check-out.
+- Returning: the phone that checked the item out sees **Return this item** when it scans the code again. From another phone, the student enters the same student ID and email, which is checked against the check-out (5 wrong tries per 10 minutes).
+- A student who scans their own late item sees a **This is late** warning on that item's page.
+- A school can require its own email domain (`SCHOOL_EMAIL_DOMAIN` for the first school, `--domain` when adding another). A student whose email does not match cannot borrow that school's items.
+- Student details are shown only to staff of the school that owns the item.
+- To erase one student's details from the records, use **Erase a student's records** on the owner page.
+- Earlier versions had student accounts. Any old accounts are still in the database but are no longer used. The owner page erase tool removes them along with the details.
 
 ## Demo requests from other schools
 
@@ -170,11 +166,10 @@ On the dashboard, every late row has an **Email reminder** button, and the top h
 
 ## How it works for students
 
-1. Create a student account once, or log in.
-2. Scan the code. The form opens with the item, the current date and time, and your details filled in.
-3. Pick an expected return date (required). Phone and purpose are optional.
-4. A confirmation screen appears.
-5. To return the item, scan the same code again (or open **My items**) and tap **Return this item**.
+1. Scan the code. The form opens with the item and the current date and time already filled in.
+2. Enter full name, student ID (lunch number), school email, expected return date (required), and phone and purpose (optional).
+3. A confirmation screen appears.
+4. To return the item, scan the same code again and tap **Return this item**.
 
 If someone else scans an item that is checked out, they see **Unavailable** and nothing about who has it.
 
@@ -230,7 +225,7 @@ Hosted on Turso: the Turso dashboard has backups and a data browser. Local or Fl
 - Student data is shown only on staff pages. Every staff page and action requires a login. Teachers see student data only for check-outs of their own items; admins see all of it.
 - Nobody can make a staff account without a sign-up code.
 - The student pages never show who has an item. Only the student who checked an item out (logged in) can return it, or an admin or the item's teacher.
-- Student and staff logins are separate: a student login never opens staff pages.
+- Student details are shown only to staff of the school that owns the item.
 - No credentials are in the code. All settings come from environment variables.
 - The database refuses a second open check-out for the same item, even if two students submit at the same moment.
 - Use HTTPS when deployed (Fly.io and Render do this for you) and set `TRUST_PROXY=1` so cookies are marked secure.
@@ -265,8 +260,7 @@ Run these by hand after setup or after any change:
 - [ ] `/admin/signup` with a wrong code is refused. With the admin code it creates an admin account and logs in.
 - [ ] Sign up a second account with the teacher code. It lands on **Items** and sees no sample items and no **People** link.
 - [ ] As the teacher, list an item. The label opens with a QR code and a barcode. **Print** opens the print dialog.
-- [ ] Logged out, scan a code: it asks you to log in. Create a student account: you land back on the item.
-- [ ] Logged in, scan a code. The item name and check-out time are read-only, and your details show under "Checking out as".
+- [ ] Scan a code (or click **Open form**). The item name and check-out time are filled in and read-only.
 - [ ] On the home page, type the code printed under the barcode. The same form opens.
 - [ ] Submit the form with no return date. An error appears and nothing is saved.
 - [ ] Submit the form with valid details. The confirmation screen appears.
@@ -274,7 +268,7 @@ Run these by hand after setup or after any change:
 - [ ] A check-out of a sample item appears for the admin and not for the teacher.
 - [ ] Open the same item link in a private window (a "different student"). It shows **Unavailable** and no student details. A duplicate check-out is not possible.
 - [ ] In the private window, log in as a second student and try to return it. It is refused.
-- [ ] Scan again as the first student. **Return this item** is offered and works, and **My items** shows it. The item is available again.
+- [ ] Scan again on the original phone. **Return this item** is offered and works. The item is available again.
 - [ ] Check out an item, then click **Mark returned** on the dashboard. It leaves the dashboard and appears in **History** as returned.
 - [ ] Check out an item with today as the return date, wait until tomorrow (or edit the date in the database). The row is highlighted **Overdue**.
 - [ ] Search by student name and by item name. Filter by **Overdue**.
@@ -283,8 +277,7 @@ Run these by hand after setup or after any change:
 - [ ] Open **Settings** (click your name): change the name, change the password (wrong current password is refused), log in with the new password.
 - [ ] Delete your own teacher account in Settings: you are logged out, your items remain as organization items. The only admin is refused.
 - [ ] As admin, open **People**, **Delete** a teacher account after the confirmation page.
-- [ ] As admin, open **Students**: the student who borrowed shows with their check-out counts. Press **Reset password**: a temporary password appears once; the student's old login stops working, and the new password leads straight to a "choose a new password" page.
-- [ ] On the dashboard, make an item late (set an old return date). **Email reminder** opens your mail app with the message written. The student sees a **late** badge and a warning.
+- [ ] On the dashboard, make an item late (set an old return date). **Email reminder** opens your mail app with the message written. The student sees **This is late** on that item's page.
 - [ ] Open `/privacy` from the footer and from both sign-up forms.
 - [ ] With `OWNER_PASSWORD` set, log in at `/owner`: add a school, read the demo request, find a student, reset their password, and erase them.
 - [ ] On the home page, send a demo request. It arrives in your own inbox. It is not visible anywhere in the admin pages.

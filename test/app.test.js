@@ -25,37 +25,27 @@ const tomorrow = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleDateSt
 
 let studentCount = 0;
 
-// Signs a new student up and returns their account and login cookie.
-async function studentSignup(overrides = {}) {
+// A student fills in the form and checks the item out. Returns the response, that phone's cookie and the details used.
+async function checkoutFor(item, { student_name, student_id, email, ...rest } = {}) {
   studentCount += 1;
   const account = {
-    name: 'Test Student',
-    student_id: '100200',
-    email: `student${studentCount}@example.edu`,
-    password: 'student-pass-123',
-    ...overrides,
+    name: student_name ?? 'Test Student',
+    student_id: student_id ?? '100200',
+    email: email ?? `student${studentCount}@example.edu`,
   };
-  const response = await request('/student/signup', {
-    method: 'POST',
-    form: { ...account, phone: '', confirm_password: account.password, next: '/account' },
-  });
-  assert.equal(response.status, 303, `sign-up failed for ${account.email}`);
-  return { account, cookie: cookiesFrom(response) };
-}
-
-// A new student signs up and checks the item out. Accepts the old field names student_name and student_id.
-async function checkoutFor(item, { student_name, student_id, email, ...rest } = {}) {
-  const { account, cookie } = await studentSignup({
-    ...(student_name && { name: student_name }),
-    ...(student_id && { student_id }),
-    ...(email && { email }),
-  });
   const response = await request(`/i/${item.code}/checkout`, {
     method: 'POST',
-    cookie,
-    form: { due_date: tomorrow(), purpose: 'Club photo day', phone: '', ...rest },
+    form: {
+      student_name: account.name,
+      student_id: account.student_id,
+      email: account.email,
+      due_date: tomorrow(),
+      purpose: 'Club photo day',
+      phone: '',
+      ...rest,
+    },
   });
-  return { response, cookie, account };
+  return { response, cookie: cookiesFrom(response), account };
 }
 
 function request(path, { method = 'GET', form, cookie } = {}) {
@@ -107,26 +97,18 @@ after(() => {
   rmSync(dbFolder, { recursive: true, force: true });
 });
 
-test('scanning while logged out asks to log in, then logged-in students get the form', async () => {
-  const loggedOut = await request(`/i/${camera.code}`);
-  const loggedOutHtml = await loggedOut.text();
-  assert.equal(loggedOut.status, 200);
-  assert.match(loggedOutHtml, /Log in to check this item out/);
-  assert.match(loggedOutHtml, new RegExp(`/student/login\\?next=%2Fi%2F${camera.code}`));
-  assert.doesNotMatch(loggedOutHtml, /name="due_date"/);
-
-  // Checking out without an account does nothing.
-  const blocked = await request(`/i/${camera.code}/checkout`, { method: 'POST', form: { due_date: tomorrow() } });
-  assert.equal(blocked.status, 303);
-  assert.match(blocked.headers.get('location'), /^\/student\/login/);
-  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts').get()).n, 0);
-
-  const { cookie } = await studentSignup();
-  const html = await (await request(`/i/${camera.code}`, { cookie })).text();
+test('scanned link opens the form with the item filled in, and there are no student accounts', async () => {
+  const response = await request(`/i/${camera.code}`);
+  const html = await response.text();
+  assert.equal(response.status, 200);
   assert.match(html, /value="Test Camera" readonly/);
+  assert.match(html, /name="student_name"/);
+  assert.match(html, /name="student_id"/);
   assert.match(html, /name="due_date"/);
-  assert.match(html, /Checking out as/);
-  assert.doesNotMatch(html, /name="student_id"/);
+  for (const path of ['/student/login', '/student/signup', '/account', '/student/new-password']) {
+    assert.equal((await request(path)).status, 404, path);
+  }
+  assert.doesNotMatch(await (await request('/')).text(), /student\/login|student\/signup|Create student account/);
 });
 
 test('unknown code shows "not found"', async () => {
@@ -135,23 +117,22 @@ test('unknown code shows "not found"', async () => {
 });
 
 test('form rejects missing and invalid fields', async () => {
-  const { cookie } = await studentSignup();
   const response = await request(`/i/${camera.code}/checkout`, {
     method: 'POST',
-    cookie,
-    form: { phone: 'abc', due_date: '2000-01-01' },
+    form: { student_name: '', student_id: 'bad id!', email: 'not-an-email', phone: 'abc', due_date: '2000-01-01' },
   });
   const html = await response.text();
   assert.equal(response.status, 400);
+  assert.match(html, /Enter your full name/);
+  assert.match(html, /letters, numbers and dashes/);
+  assert.match(html, /valid email/);
   assert.match(html, /valid phone number/);
   assert.match(html, /cannot be in the past/);
-  const noDate = await request(`/i/${camera.code}/checkout`, { method: 'POST', cookie, form: {} });
-  assert.match(await noDate.text(), /Choose an expected return date/);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts').get()).n, 0);
 });
 
 test('every admin route requires the login', async () => {
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete', '/admin/students']) {
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/admin/login', path);
@@ -171,7 +152,7 @@ test('wrong admin password is rejected', async () => {
 });
 
 test('full flow: check out, dashboard, duplicate blocked, return', async () => {
-  // A student with an account submits the form.
+  // A student submits the form.
   const { response: submit, cookie: studentCookie } = await checkoutFor(camera, {
     student_name: 'Test Student', student_id: '100200', email: 'test.student@example.edu',
   });
@@ -181,62 +162,53 @@ test('full flow: check out, dashboard, duplicate blocked, return', async () => {
   const confirmation = await (await request(submit.headers.get('location'), { cookie: studentCookie })).text();
   assert.match(confirmation, /You're all set/);
 
-  // Admin dashboard lists it, with the account marker.
+  // Admin dashboard lists it.
   const adminCookie = await adminLogin();
   const dashboard = await (await request('/admin', { cookie: adminCookie })).text();
   assert.match(dashboard, /Test Camera/);
   assert.match(dashboard, /Test Student/);
   assert.match(dashboard, /100200/);
   assert.match(dashboard, /On time/);
-  assert.match(dashboard, /Account/);
-  const linked = (await db.prepare("SELECT student_account_id FROM checkouts WHERE student_id = '100200'").get()).student_account_id;
-  assert.ok(linked);
 
   // A different student scans it: unavailable, and no personal data shown.
-  const { cookie: otherCookie } = await studentSignup({ name: 'Other Person', student_id: '999', email: 'other@example.edu' });
-  const other = await (await request(`/i/${camera.code}`, { cookie: otherCookie })).text();
+  const other = await (await request(`/i/${camera.code}`)).text();
   assert.match(other, /Unavailable/);
   assert.doesNotMatch(other, /Test Student|100200|test\.student@example\.edu/);
-  assert.doesNotMatch(await (await request(`/i/${camera.code}`)).text(), /Test Student|100200/);
 
   // A duplicate check-out is refused.
-  const duplicate = await request(`/i/${camera.code}/checkout`, { method: 'POST', cookie: otherCookie, form: { due_date: tomorrow() } });
-  assert.equal(duplicate.status, 409);
+  const duplicate = await checkoutFor(camera, { student_name: 'Other Person', student_id: '999', email: 'other@example.edu' });
+  assert.equal(duplicate.response.status, 409);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE returned_at IS NULL').get()).n, 1);
 
-  // A different student cannot return it. Logged out, they are sent to log in.
-  assert.equal((await request(`/i/${camera.code}/return`, { method: 'POST', cookie: otherCookie })).status, 403);
-  assert.equal((await request(`/i/${camera.code}/return`, { method: 'POST' })).status, 303);
-  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM checkouts WHERE returned_at IS NULL').get()).n, 1);
+  // A different student cannot return it with wrong details.
+  const wrongReturn = await request(`/i/${camera.code}/return`, { method: 'POST', form: { student_id: '999', email: 'other@example.edu' } });
+  assert.equal(wrongReturn.status, 403);
 
-  // The same student scans again: "Return this item" is offered, and My items lists it.
+  // The same student scans again on the same phone: "Return this item" is offered.
   const own = await (await request(`/i/${camera.code}`, { cookie: studentCookie })).text();
   assert.match(own, /You have this item checked out/);
   assert.match(own, /Return this item/);
-  assert.match(await (await request('/account', { cookie: studentCookie })).text(), /Test Camera/);
 
   // The student returns it.
   const returned = await request(`/i/${camera.code}/return`, { method: 'POST', cookie: studentCookie });
   assert.match(await returned.text(), /Returned/);
 
   // The item is available again, and the dashboard no longer lists it.
-  assert.match(await (await request(`/i/${camera.code}`, { cookie: studentCookie })).text(), /name="due_date"/);
+  assert.match(await (await request(`/i/${camera.code}`)).text(), /name="student_name"/);
   assert.doesNotMatch(await (await request('/admin', { cookie: adminCookie })).text(), /Test Student/);
 
   // History keeps the record.
   const history = await (await request('/admin/history', { cookie: adminCookie })).text();
   assert.match(history, /Test Student/);
   assert.match(history, /Returned/);
-  assert.match(await (await request('/account', { cookie: studentCookie })).text(), /History/);
 });
 
-test('a student can return from another phone by logging in', async () => {
-  const { account } = await checkoutFor(tripod, { student_id: 'AB-77' });
-  const login = await request('/student/login', { method: 'POST', form: { email: account.email, password: account.password, next: `/i/${tripod.code}` } });
-  assert.equal(login.status, 303);
-  assert.equal(login.headers.get('location'), `/i/${tripod.code}`);
-  const secondPhone = cookiesFrom(login);
-  const response = await request(`/i/${tripod.code}/return`, { method: 'POST', cookie: secondPhone });
+test('a student can return from another phone with student ID and email', async () => {
+  const { account } = await checkoutFor(tripod, { student_id: 'AB-77', email: 'test.student@example.edu' });
+  const response = await request(`/i/${tripod.code}/return`, {
+    method: 'POST',
+    form: { student_id: 'ab-77', email: account.email.toUpperCase() },
+  });
   assert.equal(response.status, 200);
   assert.match(await response.text(), /Returned/);
 });
@@ -493,85 +465,6 @@ test('delete accounts: own account, other accounts, last admin protected', async
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE id = ?').get(adminId)).n, 1);
 });
 
-test('student accounts: sign-up checks, login, safe redirect, separate sessions', async () => {
-  const good = { name: 'Sam Student', student_id: '12345', email: 'sam@example.edu', phone: '', password: 'student-pass-123', confirm_password: 'student-pass-123' };
-  const post = (form) => request('/student/signup', { method: 'POST', form });
-
-  for (const [override, message] of [
-    [{ name: '' }, /full name/],
-    [{ student_id: '' }, /student ID/],
-    [{ student_id: 'bad id!' }, /letters, numbers and dashes/],
-    [{ email: 'nope' }, /valid email/],
-    [{ password: 'short', confirm_password: 'short' }, /8 characters/],
-    [{ confirm_password: 'different-pass-1' }, /do not match/],
-    [{ phone: 'abc' }, /phone/],
-  ]) {
-    const response = await post({ ...good, ...override });
-    assert.equal(response.status, 400);
-    assert.match(await response.text(), message);
-  }
-  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM students WHERE email = ?').get(good.email)).n, 0);
-
-  // Success. The password is stored only as a hash.
-  const created = await post({ ...good, next: '/i/not-a-real-place-/../' });
-  assert.equal(created.status, 303);
-  assert.equal(created.headers.get('location'), '/account');
-  const stored = await db.prepare('SELECT * FROM students WHERE email = ?').get(good.email);
-  assert.doesNotMatch(stored.password_hash, /student-pass-123/);
-  assert.equal((await post(good)).status, 400);
-
-  // Login: wrong password, then right; only our own paths are valid places to go next.
-  const login = (form) => request('/student/login', { method: 'POST', form });
-  assert.equal((await login({ email: good.email, password: 'wrong-password-1' })).status, 401);
-  assert.equal((await login({ email: 'ghost@example.edu', password: 'wrong-password-1' })).status, 401);
-  const ok = await login({ email: good.email, password: good.password, next: 'https://evil.example/' });
-  assert.equal(ok.status, 303);
-  assert.equal(ok.headers.get('location'), '/account');
-  const cookie = cookiesFrom(ok);
-
-  // A student login is not a staff login, and a staff login is not a student login.
-  assert.equal((await request('/admin', { cookie })).status, 302);
-  const adminCookie = await adminLogin();
-  assert.equal((await request('/account', { cookie: adminCookie })).status, 302);
-  const forged = adminCookie.replace('admin_session', 'student_session');
-  assert.equal((await request('/account', { cookie: forged })).status, 302);
-
-  // Logging out ends the session. A deactivated account is logged out at once.
-  const loggedOut = await request('/student/logout', { method: 'POST', cookie });
-  assert.equal(loggedOut.status, 303);
-  assert.equal((await request('/account', { cookie: cookiesFrom(await login({ email: good.email, password: good.password })) + '' })).status, 200);
-  const again = cookiesFrom(await login({ email: good.email, password: good.password }));
-  await db.prepare('UPDATE students SET active = 0 WHERE email = ?').run(good.email);
-  assert.equal((await request('/account', { cookie: again })).status, 302);
-  assert.equal((await login({ email: good.email, password: good.password })).status, 401);
-});
-
-test('admins see the students who borrowed from their school; teachers cannot', async () => {
-  const adminCookie = await adminLogin();
-  const { account } = await studentSignup({ name: 'Findable Fran', student_id: '8080' });
-  // An account that has not borrowed anything is not shown to a school.
-  assert.doesNotMatch(await (await request('/admin/students?q=findable', { cookie: adminCookie })).text(), /Findable Fran/);
-
-  const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Students Test Lamp' }));
-  const tripodCheckout = await request(`/i/${lamp.code}/checkout`, {
-    method: 'POST',
-    cookie: (await request('/student/login', { method: 'POST', form: { email: account.email, password: account.password } })).headers
-      .getSetCookie().map((line) => line.split(';')[0]).join('; '),
-    form: { due_date: tomorrow() },
-  });
-  assert.equal(tripodCheckout.status, 303);
-  const page = await (await request('/admin/students?q=findable', { cookie: adminCookie })).text();
-  assert.match(page, /Findable Fran/);
-  assert.match(page, /8080/);
-  assert.doesNotMatch(page, /password_hash|scrypt/);
-
-  const teacherCookie = cookiesFrom(await signUp({ name: 'Plain Teacher', email: 'plain.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
-  assert.equal((await request('/admin/students', { cookie: teacherCookie })).status, 403);
-  // The old owner-wide demo page is gone.
-  assert.equal((await request('/admin/demos', { cookie: adminCookie })).status, 404);
-  await request(`/admin/checkouts/${(await db.prepare("SELECT id FROM checkouts WHERE student_id = '8080'").get()).id}/return`, { method: 'POST', cookie: adminCookie });
-});
-
 test('demo requests: validated, saved, emailed to the owner, spam-resistant, not shown to admins', async () => {
   demoEmails = [];
   const send = (form) => request('/demo', { method: 'POST', form });
@@ -608,7 +501,7 @@ test('demo requests: validated, saved, emailed to the owner, spam-resistant, not
 
   // A school admin cannot see demo requests anywhere.
   const adminCookie = await adminLogin();
-  for (const path of ['/admin', '/admin/students', '/admin/people', '/admin/items', '/admin/history']) {
+  for (const path of ['/admin', '/admin/people', '/admin/items', '/admin/history']) {
     assert.doesNotMatch(await (await request(path, { cookie: adminCookie })).text(), /Other High School|dana@otherschool/, path);
   }
 
@@ -648,12 +541,8 @@ test('schools are separate: each admin sees only their own school', async () => 
   // They start empty: nothing from the first school shows, not items, not check-outs, not people, not students.
   await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'Rowland Only Kayak' } });
   const kayak = await db.prepare("SELECT * FROM items WHERE name = 'Rowland Only Kayak'").get();
-  await request(`/i/${kayak.code}/checkout`, {
-    method: 'POST',
-    cookie: (await studentSignup({ name: 'Kay Kayaker', student_id: '5150' })).cookie,
-    form: { due_date: tomorrow() },
-  });
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/people', '/admin/students', '/admin/export.csv?scope=all']) {
+  await checkoutFor(kayak, { student_name: 'Kay Kayaker', student_id: '5150' });
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/people', '/admin/export.csv?scope=all']) {
     const page = await (await request(path, { cookie: otherCookie })).text();
     assert.doesNotMatch(page, /Rowland Only Kayak|Kay Kayaker|Test Admin|admin@example\.edu|Test Camera/, path);
   }
@@ -697,14 +586,13 @@ test('schools are separate: each admin sees only their own school', async () => 
 
   // The other school's email domain is checked when a student checks out one of its items.
   const telescope = await db.prepare("SELECT * FROM items WHERE name = 'Academy Telescope'").get();
-  const { cookie: wrongDomain } = await studentSignup({ email: 'someone@elsewhere.org' });
-  const refused = await request(`/i/${telescope.code}/checkout`, { method: 'POST', cookie: wrongDomain, form: { due_date: tomorrow() } });
-  assert.equal(refused.status, 400);
-  assert.match(await refused.text(), /@other\.edu/);
-  const { cookie: rightDomain } = await studentSignup({ email: 'pat@other.edu' });
-  assert.equal((await request(`/i/${telescope.code}/checkout`, { method: 'POST', cookie: rightDomain, form: { due_date: tomorrow() } })).status, 303);
-  assert.match(await (await request('/admin/students', { cookie: otherCookie })).text(), /pat@other\.edu/);
-  assert.doesNotMatch(await (await request('/admin/students', { cookie: adminCookie })).text(), /pat@other\.edu/);
+  const refused = await checkoutFor(telescope, { email: 'someone@elsewhere.org' });
+  assert.equal(refused.response.status, 400);
+  assert.match(await refused.response.text(), /@other\.edu/);
+  const accepted = await checkoutFor(telescope, { email: 'pat@other.edu' });
+  assert.equal(accepted.response.status, 303);
+  assert.match(await (await request('/admin', { cookie: otherCookie })).text(), /pat@other\.edu/);
+  assert.doesNotMatch(await (await request('/admin', { cookie: adminCookie })).text(), /pat@other\.edu/);
 });
 
 test('the demo email goes to the owner through the email service', async () => {
@@ -733,16 +621,6 @@ test('the demo email goes to the owner through the email service', async () => {
   const failing = makeDemoNotifier({ apiKey: 'k', to: 'o@example.com', fetchImpl: async () => ({ ok: false, status: 403 }) });
   await assert.rejects(() => failing({ name: 'a', email: 'a@b.co', school: 's' }), /403/);
 });
-test('wrong student passwords lock only that account, not everyone on the same network', async () => {
-  const victim = (await studentSignup({ email: 'victim@example.edu' })).account;
-  const bystander = (await studentSignup({ email: 'bystander@example.edu' })).account;
-  const login = (account, password) =>
-    request('/student/login', { method: 'POST', form: { email: account.email, password } });
-  for (let i = 0; i < 8; i++) assert.equal((await login(victim, 'wrong-password-1')).status, 401);
-  assert.equal((await login(victim, victim.password)).status, 429);
-  assert.equal((await login(bystander, bystander.password)).status, 303);
-});
-
 test('the home page has the animated diagram and its script, and no separate scroll story', async () => {
   const home = await (await request('/')).text();
   assert.match(home, /id="diagram"/);
@@ -822,55 +700,12 @@ test('changing your password logs out your other devices', async () => {
   assert.equal((await request('/admin/items', { cookie: cookiesFrom(change) })).status, 200);
 });
 
-test('student passwords: admin reset for students of their school, forced change, others untouched', async () => {
-  const adminCookie = await adminLogin();
-  const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Reset Test Lamp' }));
-  const { account, cookie: oldCookie } = await studentSignup({ name: 'Locked Out Lou', student_id: '7777' });
-  const checkout = await request(`/i/${lamp.code}/checkout`, { method: 'POST', cookie: oldCookie, form: { due_date: tomorrow() } });
-  assert.equal(checkout.status, 303);
-  const studentId = (await db.prepare('SELECT id FROM students WHERE email = ?').get(account.email)).id;
-
-  // A student who never borrowed from this school cannot be reset by it. Teachers cannot reset at all.
-  const stranger = await studentSignup({ student_id: '8888' });
-  const strangerId = (await db.prepare('SELECT id FROM students WHERE email = ?').get(stranger.account.email)).id;
-  assert.equal((await request(`/admin/students/${strangerId}/reset-password`, { method: 'POST', cookie: adminCookie })).status, 404);
-  const teacherCookie = cookiesFrom(await signUp({ name: 'Student Teacher', email: 'studentteacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
-  assert.equal((await request(`/admin/students/${studentId}/reset-password`, { method: 'POST', cookie: teacherCookie })).status, 403);
-
-  const reset = await request(`/admin/students/${studentId}/reset-password`, { method: 'POST', cookie: adminCookie });
-  assert.equal(reset.status, 200);
-  const temporary = (await reset.text()).match(/<code>([A-Za-z0-9]{12})<\/code>/)[1];
-
-  // Old login ends. The temporary password only leads to choosing a new one.
-  assert.equal((await request('/account', { cookie: oldCookie })).status, 302);
-  assert.equal((await request('/student/login', { method: 'POST', form: { email: account.email, password: account.password } })).status, 401);
-  const login = await request('/student/login', { method: 'POST', form: { email: account.email, password: temporary } });
-  const tempCookie = cookiesFrom(login);
-  for (const path of ['/account', `/i/${lamp.code}`, '/']) {
-    assert.equal((await request(path, { cookie: tempCookie })).headers.get('location'), '/student/new-password', path);
-  }
-  assert.match(await (await request('/student/new-password', { cookie: tempCookie })).text(), /Choose a new password/);
-  const done = await request('/student/new-password', { method: 'POST', cookie: tempCookie, form: { password: 'my-own-new-pass', confirm_password: 'my-own-new-pass' } });
-  assert.equal(done.status, 303);
-  const newCookie = cookiesFrom(done);
-  assert.match(await (await request('/account', { cookie: newCookie })).text(), /Reset Test Lamp/);
-  // The other student was not touched.
-  assert.equal((await request('/account', { cookie: stranger.cookie })).status, 200);
-  await request(`/admin/checkouts/${(await db.prepare('SELECT id FROM checkouts WHERE item_id = ?').get(lamp.id)).id}/return`, { method: 'POST', cookie: adminCookie });
-});
-
-test('students see a warning when something is late', async () => {
+test('a student sees a warning on a late item', async () => {
   const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Late Warning Lamp' }));
-  const { cookie } = await studentSignup({ student_id: '9191' });
-  await request(`/i/${lamp.code}/checkout`, { method: 'POST', cookie, form: { due_date: tomorrow() } });
-  assert.doesNotMatch(await (await request('/account', { cookie })).text(), /late-badge|is late|are late/);
-
+  const { cookie } = await checkoutFor(lamp, { student_id: '9191' });
+  assert.doesNotMatch(await (await request(`/i/${lamp.code}`, { cookie })).text(), /This is late/);
   await db.prepare("UPDATE checkouts SET due_date = '2020-01-01' WHERE item_id = ? AND returned_at IS NULL").run(lamp.id);
-  const account = await (await request('/account', { cookie })).text();
-  assert.match(account, /1 item is late/);
-  assert.match(account, /late-badge[^>]*>1 late/);
   assert.match(await (await request(`/i/${lamp.code}`, { cookie })).text(), /This is late/);
-  assert.match(await (await request('/', { cookie })).text(), /1 late/);
   await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), lamp.id);
 });
 
@@ -912,18 +747,19 @@ test('late items get a ready-written email link, on time items do not', async ()
   }
 });
 
-test('privacy and terms page is public and linked from the sign-up forms', async () => {
+test('privacy and terms page is public and linked from the forms and footers', async () => {
   const page = await request('/privacy');
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /<h1>Privacy and terms<\/h1>/);
   assert.match(html, /Other schools never see it/);
-  assert.match(html, /scrambled version of your password/);
-  for (const path of ['/', '/student/signup', '/admin/signup', '/student/login', '/privacy']) {
+  assert.match(html, /You do not make an account/);
+  for (const path of ['/', '/admin/signup', '/admin/login', '/privacy']) {
     assert.match(await (await request(path)).text(), /href="\/privacy"/, path);
   }
-  assert.match(await (await request('/student/signup')).text(), /you agree to the <a href="\/privacy">/);
   assert.match(await (await request('/admin/signup')).text(), /you agree to the <a href="\/privacy">/);
+  const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Privacy Test Lamp' }));
+  assert.match(await (await request(`/i/${lamp.code}`)).text(), /agree to the <a href="\/privacy">/);
 });
 
 async function ownerLogin() {
@@ -943,13 +779,13 @@ test('the owner page is off without a password, and locked without the login', a
   assert.equal((await fetch(`${bareUrl}/owner/login`, { redirect: 'manual' })).status, 404);
   bareServer.close();
 
-  for (const path of ['/owner', '/owner/demos', '/owner/accounts', '/owner/accounts/students/1/erase', '/owner/accounts/staff/1/delete']) {
+  for (const path of ['/owner', '/owner/demos', '/owner/accounts', '/owner/students/erase?who=x', '/owner/accounts/staff/1/delete']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/owner/login', path);
   }
   for (const path of ['/owner/schools', '/owner/schools/1', '/owner/schools/2/codes', '/owner/demos/1/status', '/owner/demos/1/delete',
-    '/owner/accounts/staff/1/reset-password', '/owner/accounts/students/1/reset-password', '/owner/accounts/students/1/erase', '/owner/accounts/staff/1/delete', '/owner/logout']) {
+    '/owner/accounts/staff/1/reset-password', '/owner/students/erase', '/owner/accounts/staff/1/delete', '/owner/logout']) {
     assert.equal((await request(path, { method: 'POST', form: {} })).status, 401, path);
   }
   assert.equal((await request('/owner/login', { method: 'POST', form: { password: 'wrong-owner-password' } })).status, 401);
@@ -1006,43 +842,50 @@ test('owner: add a school, new codes, rename, read and clear demo requests', asy
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM demo_requests').get()).n, 0);
 });
 
-test('owner: help with lost passwords, erase a student, delete a staff account', async () => {
+test('owner: erase a student by email or ID, reset a staff password, delete a staff account', async () => {
   const ownerCookie = await ownerLogin();
-
-  // A student who never borrowed anything is invisible to schools but the owner can help them.
-  const loner = await studentSignup({ name: 'Lost Student', student_id: '4040' });
-  const found = await (await request(`/owner/accounts?q=${encodeURIComponent(loner.account.email)}`, { cookie: ownerCookie })).text();
-  assert.match(found, /Lost Student/);
-  const lonerId = (await db.prepare('SELECT id FROM students WHERE email = ?').get(loner.account.email)).id;
-  const reset = await request(`/owner/accounts/students/${lonerId}/reset-password`, { method: 'POST', cookie: ownerCookie });
-  const temporary = (await reset.text()).match(/<code>([A-Za-z0-9]{12})<\/code>/)[1];
-  assert.equal((await request('/account', { cookie: loner.cookie })).status, 302);
-  const tempCookie = cookiesFrom(await request('/student/login', { method: 'POST', form: { email: loner.account.email, password: temporary } }));
-  assert.equal((await request('/account', { cookie: tempCookie })).headers.get('location'), '/student/new-password');
-
-  // Erasing a student removes their details from every check-out.
-  const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Erase Test Lamp' }));
-  const { account, cookie } = await studentSignup({ name: 'Erase Me', student_id: '5959', email: 'erase.me@example.edu' });
-  await request(`/i/${lamp.code}/checkout`, { method: 'POST', cookie, form: { due_date: tomorrow(), phone: '555-123-4567', purpose: 'my private note' } });
-  const studentId = (await db.prepare('SELECT id FROM students WHERE email = ?').get(account.email)).id;
-  assert.match(await (await request(`/owner/accounts/students/${studentId}/erase`, { cookie: ownerCookie })).text(), /cannot be undone/);
-  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM students WHERE id = ?').get(studentId)).n, 1);
-  assert.equal((await request(`/owner/accounts/students/${studentId}/erase`, { method: 'POST', cookie: ownerCookie })).status, 303);
-  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM students WHERE id = ?').get(studentId)).n, 0);
-  const left = await db.prepare('SELECT * FROM checkouts WHERE item_id = ?').get(lamp.id);
-  assert.equal(left.student_name, '(erased)');
-  for (const field of ['student_id', 'email', 'phone', 'purpose']) assert.equal(left[field], '', field);
-  assert.equal(left.student_account_id, null);
   const adminCookie = await adminLogin();
+
+  // Erasing a student removes their details from every check-out, matched by email or by student ID.
+  const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Erase Test Lamp' }));
+  const rug = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Erase Test Rug' }));
+  await checkoutFor(lamp, { student_name: 'Erase Me', student_id: '5959', email: 'erase.me@example.edu', phone: '555-123-4567', purpose: 'my private note' });
+  await checkoutFor(rug, { student_name: 'Erase Me', student_id: '5959', email: 'ERASE.ME@example.edu' });
+  const mat = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Erase Test Mat' }));
+  await checkoutFor(mat, { student_name: 'Keep Me', student_id: '6060', email: 'keep.me@example.edu' });
+  // Left over from the time when students had accounts.
+  await db
+    .prepare('INSERT INTO students (name, student_id, email, password_hash, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('Erase Me', '5959', 'erase.me@example.edu', 'scrypt$00$00', new Date().toISOString());
+
+  const review = await (await request(`/owner/students/erase?who=${encodeURIComponent('Erase.Me@example.edu')}`, { cookie: ownerCookie })).text();
+  assert.match(review, /<strong>2<\/strong> check-outs/);
+  assert.match(review, /cannot be undone/);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM checkouts WHERE student_name = 'Erase Me'").get()).n, 2);
+
+  assert.equal((await request('/owner/students/erase', { method: 'POST', cookie: ownerCookie, form: { who: 'erase.me@example.edu' } })).status, 303);
+  const erased = await db.prepare("SELECT * FROM checkouts WHERE student_name = '(erased)' ORDER BY id").all();
+  assert.equal(erased.length, 2);
+  for (const row of erased) for (const field of ['student_id', 'email', 'phone', 'purpose']) assert.equal(row[field], '', field);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM students WHERE email = 'erase.me@example.edu'").get()).n, 0);
   assert.doesNotMatch(await (await request('/admin/history', { cookie: adminCookie })).text(), /Erase Me|erase\.me|5959|my private note/);
-  assert.equal((await request('/student/login', { method: 'POST', form: { email: account.email, password: account.password } })).status, 401);
-  await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), lamp.id);
+  // Other students are untouched.
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM checkouts WHERE student_name = 'Keep Me' AND email = 'keep.me@example.edu'").get()).n, 1);
+
+  // Matching by student ID alone works too.
+  const byId = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Erase By Id Lamp' }));
+  await checkoutFor(byId, { student_name: 'Id Only', student_id: '7171', email: 'id.only@example.edu' });
+  await request('/owner/students/erase', { method: 'POST', cookie: ownerCookie, form: { who: '7171' } });
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM checkouts WHERE student_id = '7171'").get()).n, 0);
+  for (const id of [lamp.id, rug.id, mat.id, byId.id]) await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ? AND returned_at IS NULL').run(new Date().toISOString(), id);
 
   // Staff: reset a password, then delete the account (their items stay with the school).
   const teacher = { name: 'Owner Helped', email: 'owner.helped@example.edu', password: 'long-enough-password' };
   const teacherCookie = cookiesFrom(await signUp(teacher, TEACHER_CODE));
   await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Owner Helped Item' } });
   const teacherId = (await db.prepare('SELECT id FROM users WHERE email = ?').get(teacher.email)).id;
+  const found = await (await request(`/owner/accounts?q=${encodeURIComponent('owner.helped')}`, { cookie: ownerCookie })).text();
+  assert.match(found, /Owner Helped/);
   const staffReset = await request(`/owner/accounts/staff/${teacherId}/reset-password`, { method: 'POST', cookie: ownerCookie });
   assert.match(await staffReset.text(), /<code>[A-Za-z0-9]{12}<\/code>/);
   assert.equal((await request('/admin', { cookie: teacherCookie })).status, 302);
@@ -1052,3 +895,4 @@ test('owner: help with lost passwords, erase a student, delete a staff account',
   assert.equal(item.owner_id, null);
   assert.equal(item.school_id, 1);
 });
+
