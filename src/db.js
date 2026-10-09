@@ -51,6 +51,16 @@ CREATE TABLE IF NOT EXISTS students (
   created_at    TEXT NOT NULL
 );
 
+-- People waiting for an item that is checked out. Staff email them when it is back.
+CREATE TABLE IF NOT EXISTS waitlist (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id    INTEGER NOT NULL REFERENCES items(id),
+  name       TEXT NOT NULL,
+  email      TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS waitlist_by_item ON waitlist(item_id);
+
 -- Schools that asked for a demo from the home page.
 CREATE TABLE IF NOT EXISTS demo_requests (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +140,16 @@ export async function openDb({ url, authToken }) {
     await client.execute({ sql: `UPDATE ${table} SET school_id = ? WHERE school_id IS NULL`, args: [DEFAULT_SCHOOL_ID] });
   }
 
+  // Item categories, and an optional public "what is available" link for each school.
+  const itemColumnsNow = (await db.prepare('PRAGMA table_info(items)').all()).map((column) => column.name);
+  if (!itemColumnsNow.includes('category')) {
+    await client.execute("ALTER TABLE items ADD COLUMN category TEXT NOT NULL DEFAULT ''");
+  }
+  const schoolColumns = (await db.prepare('PRAGMA table_info(schools)').all()).map((column) => column.name);
+  if (!schoolColumns.includes('list_code')) {
+    await client.execute('ALTER TABLE schools ADD COLUMN list_code TEXT');
+  }
+
   // Return notes (damage, missing parts) and one extension of the return date.
   const checkoutExtras = (await db.prepare('PRAGMA table_info(checkouts)').all()).map((column) => column.name);
   if (!checkoutExtras.includes('return_notes')) {
@@ -165,10 +185,10 @@ export function newItemCode() {
 }
 
 // ownerId is the staff member who listed the item. null means it belongs to the organization.
-export async function createItem(db, { name, description = '', ownerId = null, schoolId = DEFAULT_SCHOOL_ID }) {
+export async function createItem(db, { name, description = '', category = '', ownerId = null, schoolId = DEFAULT_SCHOOL_ID }) {
   const result = await db
-    .prepare('INSERT INTO items (code, name, description, owner_id, school_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(newItemCode(), name, description, ownerId, schoolId, new Date().toISOString());
+    .prepare('INSERT INTO items (code, name, description, category, owner_id, school_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(newItemCode(), name, description, category, ownerId, schoolId, new Date().toISOString());
   return Number(result.lastInsertRowid);
 }
 

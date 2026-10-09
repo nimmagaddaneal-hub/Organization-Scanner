@@ -84,7 +84,8 @@ export function createApp({
     next();
   });
   app.use(express.static(fileURLToPath(new URL('../public', import.meta.url))));
-  app.use(express.urlencoded({ extended: false, limit: '20kb' }));
+  // 100 kb leaves room for pasting a spreadsheet of items.
+  app.use(express.urlencoded({ extended: false, limit: '100kb' }));
 
   // Block form posts that come from another website.
   app.use((req, res, next) => {
@@ -136,6 +137,26 @@ export function createApp({
   app.get('/', async (req, res) => res.send(homePage(req, { demoSent: req.query.demo === 'sent' })));
 
   app.get('/privacy', async (req, res) => res.send(views.privacyPage({})));
+
+  // What is available at a school right now. No names, only the item and whether it is out.
+  app.get('/available/:token', async (req, res) => {
+    const token = String(req.params.token);
+    const school = /^[A-Za-z0-9_-]{10,40}$/.test(token)
+      ? await db.prepare('SELECT id, name FROM schools WHERE list_code = ?').get(token)
+      : null;
+    if (!school) {
+      return res.status(404).send(views.messagePage({ title: 'Page not found', message: 'This link does not work. Ask your teacher for a new one.', status: 'warning' }));
+    }
+    const items = await db
+      .prepare(
+        `SELECT i.name, i.description, i.category,
+                (SELECT c.due_date FROM checkouts c WHERE c.item_id = i.id AND c.returned_at IS NULL) AS due_date
+           FROM items i WHERE i.school_id = ? AND i.active = 1
+          ORDER BY i.category COLLATE NOCASE, i.name COLLATE NOCASE`
+      )
+      .all(school.id);
+    res.send(views.availablePage({ school, items }));
+  });
 
   app.post('/demo', async (req, res) => {
     const values = {
@@ -708,14 +729,115 @@ export function createApp({
                 EXISTS(SELECT 1 FROM checkouts c WHERE c.item_id = i.id AND c.returned_at IS NULL) AS is_out
            FROM items i LEFT JOIN users u ON u.id = i.owner_id
           ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-          ORDER BY i.active DESC, i.name COLLATE NOCASE`
+          ORDER BY i.active DESC, i.category COLLATE NOCASE, i.name COLLATE NOCASE`
       )
       .all(...params);
   }
 
-  const itemValues = (req) => ({ name: text(req.body?.name, 100), description: text(req.body?.description, 200) });
+  const itemValues = (req) => ({
+    name: text(req.body?.name, 100),
+    description: text(req.body?.description, 200),
+    category: text(req.body?.category, 40),
+  });
 
-  admin.get('/items', async (req, res) => res.send(views.itemsPage({ user: req.user, items: await findItems(req.user) })));
+  const categoriesOf = async (user) => {
+    const where = [];
+    const params = [];
+    ownerScope(user, where, params);
+    where.push("i.category != ''");
+    return (
+      await db.prepare(`SELECT DISTINCT i.category FROM items i WHERE ${where.join(' AND ')} ORDER BY i.category COLLATE NOCASE`).all(...params)
+    ).map((row) => row.category);
+  };
+
+  const availabilityUrl = async (req) => {
+    if (req.user.role !== 'admin') return undefined;
+    const school = await db.prepare('SELECT list_code FROM schools WHERE id = ?').get(req.user.school_id);
+    if (!school?.list_code) return null;
+    return `${(baseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '')}/available/${school.list_code}`;
+  };
+
+  const itemsView = async (req, extra = {}) =>
+    views.itemsPage({
+      user: req.user,
+      items: await findItems(req.user),
+      categories: await categoriesOf(req.user),
+      availabilityUrl: await availabilityUrl(req),
+      notice: text(req.query.saved, 20),
+      imported: Number(req.query.imported) || 0,
+      skipped: Number(req.query.skipped) || 0,
+      ...extra,
+    });
+
+  admin.get('/items', async (req, res) => res.send(await itemsView(req)));
+
+  // Paste or upload a spreadsheet: name, description, category (a header row is fine).
+  const IMPORT_MAX_ROWS = 100;
+  function parseCsv(textValue) {
+    const rows = [];
+    let row = [];
+    let cell = '';
+    let quoted = false;
+    const source = String(textValue).replace(/^\uFEFF/, '');
+    for (let i = 0; i < source.length; i++) {
+      const char = source[i];
+      if (quoted) {
+        if (char === '"' && source[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else if (char === '"') quoted = false;
+        else cell += char;
+      } else if (char === '"') quoted = true;
+      else if (char === ',' || char === '\t') {
+        row.push(cell);
+        cell = '';
+      } else if (char === '\n' || char === '\r') {
+        if (char === '\r' && source[i + 1] === '\n') i++;
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = '';
+      } else cell += char;
+    }
+    row.push(cell);
+    rows.push(row);
+    return rows.filter((cells) => cells.some((value) => value.trim() !== ''));
+  }
+
+  admin.post('/items/import', async (req, res) => {
+    let rows = parseCsv(req.body?.csv ?? '');
+    if (rows.length && ['name', 'item', 'item name'].includes(String(rows[0][0]).trim().toLowerCase())) rows = rows.slice(1);
+    let imported = 0;
+    let skipped = 0;
+    for (const cells of rows) {
+      if (imported >= IMPORT_MAX_ROWS) {
+        skipped += 1;
+        continue;
+      }
+      const name = text(cells[0], 100);
+      if (!name) {
+        skipped += 1;
+        continue;
+      }
+      await createItem(db, {
+        name,
+        description: text(cells[1], 200),
+        category: text(cells[2], 40),
+        ownerId: req.user.id,
+        schoolId: req.user.school_id,
+      });
+      imported += 1;
+    }
+    res.redirect(303, `/admin/items?saved=imported&imported=${imported}&skipped=${skipped}`);
+  });
+
+  // A public "what is available" page for the school, behind a link only the admin can make.
+  admin.post('/availability', requireAdmin, async (req, res) => {
+    const action = req.body?.action;
+    const code = action === 'off' ? null : randomBytes(12).toString('base64url');
+    await db.prepare('UPDATE schools SET list_code = ? WHERE id = ?').run(code, req.user.school_id);
+    res.redirect(303, '/admin/items?saved=link');
+  });
 
   // Listing an item makes its code at once and goes straight to the printable label.
   admin.post('/items', async (req, res) => {
@@ -723,7 +845,7 @@ export function createApp({
     if (!values.name) {
       return res
         .status(400)
-        .send(views.itemsPage({ user: req.user, items: await findItems(req.user), values, errors: ['Enter an item name.'] }));
+        .send(await itemsView(req, { values, errors: ['Enter an item name.'] }));
     }
     const itemId = await createItem(db, { ...values, ownerId: req.user.id, schoolId: req.user.school_id });
     res.redirect(303, `/admin/qr?item=${itemId}&listed=1`);
@@ -732,7 +854,7 @@ export function createApp({
   admin.get('/items/:id/edit', async (req, res) => {
     const [item] = await findItems(req.user, { id: Number(req.params.id) });
     if (!item) return res.status(404).type('text').send('Item not found');
-    res.send(views.editItemPage({ user: req.user, item }));
+    res.send(views.editItemPage({ user: req.user, item, categories: await categoriesOf(req.user) }));
   });
 
   admin.post('/items/:id', async (req, res) => {
@@ -744,9 +866,10 @@ export function createApp({
         .status(400)
         .send(views.editItemPage({ user: req.user, item: { ...item, ...values }, errors: ['Enter an item name.'] }));
     }
-    await db.prepare('UPDATE items SET name = ?, description = ?, active = ? WHERE id = ?').run(
+    await db.prepare('UPDATE items SET name = ?, description = ?, category = ?, active = ? WHERE id = ?').run(
       values.name,
       values.description,
+      values.category,
       values.active,
       item.id
     );
@@ -789,8 +912,17 @@ export function createApp({
         barcode: bwipjs.toSVG({ bcid: 'code128', text: item.code, height: 10, includetext: true, textxalign: 'center' }),
       }))
     );
+    const size = ['large', 'medium', 'small', 'tiny'].includes(req.query.size) ? req.query.size : 'medium';
     res.send(
-      views.qrSheetPage({ user: req.user, labels, baseUrl: root, single, justListed: req.query.listed === '1' && labels.length > 0 })
+      views.qrSheetPage({
+        user: req.user,
+        labels,
+        baseUrl: root,
+        single,
+        size,
+        itemId: single ? Number(req.query.item) : null,
+        justListed: req.query.listed === '1' && labels.length > 0,
+      })
     );
   });
 

@@ -678,16 +678,24 @@ ${body}`,
   });
 }
 
-function itemFields(values = {}) {
+function itemFields(values = {}, categories = []) {
   return `<label>Item name <span class="required">*</span>
     <input type="text" name="name" value="${esc(values.name)}" maxlength="100" required>
   </label>
   <label>Description <span class="muted">(optional)</span>
     <input type="text" name="description" value="${esc(values.description)}" maxlength="200">
+  </label>
+  <label>Category <span class="muted">(optional, example: Cameras)</span>
+    <input type="text" name="category" value="${esc(values.category)}" maxlength="40" list="category-list" autocomplete="off">
+    <datalist id="category-list">${categories.map((category) => `<option value="${esc(category)}">`).join('')}</datalist>
   </label>`;
 }
 
-export function itemsPage({ user, items, errors = [], values = {} }) {
+export function itemsPage({ user, items, categories = [], availabilityUrl, errors = [], values = {}, notice = '', imported = 0, skipped = 0 }) {
+  const notices = {
+    imported: `${imported} item${imported === 1 ? '' : 's'} added${skipped ? `, ${skipped} skipped (no name, or over the limit of 100 per import)` : ''}. Print their labels from Codes.`,
+    link: 'Saved.',
+  };
   return layout({
     title: 'Items',
     user,
@@ -697,22 +705,55 @@ export function itemsPage({ user, items, errors = [], values = {} }) {
   <h1>Items</h1>
   <a class="button secondary" href="/admin/qr">Print all codes</a>
 </div>
+${notices[notice] ? `<div class="alert success" role="status">${notices[notice]}</div>` : ''}
 <form method="post" action="/admin/items" class="card inline-form">
   <h2>List an item</h2>
   <p class="muted small">A QR code and barcode are made for the item as soon as you add it.</p>
   ${errorList(errors)}
-  ${itemFields(values)}
+  ${itemFields(values, categories)}
   <button class="primary">Add item and get code</button>
 </form>
+<details class="card">
+  <summary>Add many items from a spreadsheet</summary>
+  <p class="muted small">One item per row: name, description, category. A header row is fine. In Excel or Google Sheets, copy the cells and paste them here, or choose a saved CSV file. Up to 100 items at a time.</p>
+  <form method="post" action="/admin/items/import">
+    <label>Choose a CSV file <span class="muted">(optional)</span>
+      <input type="file" id="import-file" accept=".csv,.tsv,.txt,text/csv,text/plain">
+    </label>
+    <label>Items
+      <textarea name="csv" id="import-text" rows="6" required placeholder="Camera #1,Canon body and lens,Cameras&#10;Tripod,Aluminium,Cameras&#10;Folding table,6 ft,Furniture"></textarea>
+    </label>
+    <button class="primary">Import items</button>
+  </form>
+  <script src="/import.js" defer></script>
+</details>
+${
+  user.role === 'admin'
+    ? `<section class="card">
+  <h2>What's available link</h2>
+  <p class="muted small">A page anyone with the link can open to see which of your school's items are available right now. It shows items only, never names. Turn it off any time.</p>
+  ${
+    availabilityUrl
+      ? `<p><input type="text" readonly value="${esc(availabilityUrl)}" aria-label="Availability link" class="copy-field"></p>
+  <div class="row-actions">
+    <form method="post" action="/admin/availability"><input type="hidden" name="action" value="new"><button class="secondary small">Make a new link</button></form>
+    <form method="post" action="/admin/availability"><input type="hidden" name="action" value="off"><button class="link-button danger-link">Turn off</button></form>
+  </div>`
+      : `<form method="post" action="/admin/availability"><input type="hidden" name="action" value="new"><button class="secondary">Create the link</button></form>`
+  }
+</section>`
+    : ''
+}
 ${
   items.length
     ? `<div class="table-wrap"><table>
-<thead><tr><th>Name</th><th>Description</th>${user.role === 'admin' ? '<th>Listed by</th>' : ''}<th>Status</th><th></th></tr></thead>
+<thead><tr><th>Name</th><th>Category</th><th>Description</th>${user.role === 'admin' ? '<th>Listed by</th>' : ''}<th>Status</th><th></th></tr></thead>
 <tbody>
 ${items
   .map(
     (item) => `<tr class="${item.active ? '' : 'row-retired'}">
   <td>${esc(item.name)}</td>
+  <td>${esc(item.category)}</td>
   <td>${esc(item.description)}</td>
   ${user.role === 'admin' ? `<td>${esc(item.owner_name ?? 'Organization')}</td>` : ''}
   <td>${
@@ -732,7 +773,7 @@ ${items
   });
 }
 
-export function editItemPage({ user, item, errors = [] }) {
+export function editItemPage({ user, item, categories = [], errors = [] }) {
   return layout({
     title: `Edit ${item.name}`,
     user,
@@ -740,7 +781,7 @@ export function editItemPage({ user, item, errors = [] }) {
     body: `<h1>Edit item</h1>
 ${errorList(errors)}
 <form method="post" action="/admin/items/${item.id}" class="card">
-  ${itemFields(item)}
+  ${itemFields(item, categories)}
   <label class="checkbox">
     <input type="checkbox" name="active" value="1" ${item.active ? 'checked' : ''}>
     Active (uncheck to retire the item; its QR code stops working, its history is kept)
@@ -775,7 +816,7 @@ export function deleteItemPage({ user, item, historyCount }) {
   });
 }
 
-export function qrSheetPage({ user, labels, baseUrl, single, justListed }) {
+export function qrSheetPage({ user, labels, baseUrl, single, justListed, size = 'medium', itemId = null }) {
   const localWarning = /\/\/(localhost|127\.0\.0\.1)/.test(baseUrl)
     ? `<div class="alert warning no-print">These codes point to <strong>${esc(baseUrl)}</strong>, which only works on this computer. Set <code>BASE_URL</code> in <code>.env</code> to an address phones can reach before printing.</div>`
     : '';
@@ -786,8 +827,19 @@ export function qrSheetPage({ user, labels, baseUrl, single, justListed }) {
     wide: true,
     body: `<div class="page-head no-print">
   <h1>${single ? 'Item code' : 'Item codes'}</h1>
-  <div>
+  <div class="actions-row">
     ${single ? '<a class="button secondary" href="/admin/qr">All items</a>' : ''}
+    <form method="get" action="/admin/qr" class="size-form">
+      ${itemId ? `<input type="hidden" name="item" value="${itemId}">` : ''}
+      <label class="inline-label">Label size
+        <select name="size" aria-label="Label size">
+          ${[['large', 'Large (2 across)'], ['medium', 'Medium (3 across)'], ['small', 'Small (4 across)'], ['tiny', 'Sticker (6 across, QR and name)']]
+            .map(([value, label]) => `<option value="${value}" ${size === value ? 'selected' : ''}>${label}</option>`)
+            .join('')}
+        </select>
+      </label>
+      <noscript><button class="secondary small">Apply</button></noscript>
+    </form>
     <button class="primary" id="print-button">Print</button>
   </div>
 </div>
@@ -796,7 +848,7 @@ ${localWarning}
 <p class="muted small no-print">Phones scan the QR code. Handheld barcode scanners read the barcode; type or scan it into the box on the home page.</p>
 ${
   labels.length
-    ? `<div class="qr-sheet">
+    ? `<div class="qr-sheet size-${esc(size)}">
 ${labels
   .map(
     (label) => `<div class="qr-label">
@@ -1235,5 +1287,43 @@ export function scanPage() {
   <button class="secondary">Find item</button>
 </form>
 <script src="/scan.js" defer></script>`,
+  });
+}
+
+// ---------- What is available (public) ----------
+
+export function availablePage({ school, items }) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = item.category || 'Other';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  const free = items.filter((item) => !item.due_date).length;
+  return layout({
+    title: `Available at ${school.name}`,
+    wide: true,
+    body: `<h1>Available now</h1>
+<p class="page-sub">${esc(school.name)} &middot; ${free} of ${items.length} item${items.length === 1 ? '' : 's'} available. To borrow something, scan the QR code on it.</p>
+${
+  items.length
+    ? [...groups.entries()]
+        .map(
+          ([category, list]) => `<h2>${esc(category)}</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Item</th><th>Description</th><th>Status</th></tr></thead>
+<tbody>
+${list
+  .map(
+    (item) => `<tr><td>${esc(item.name)}</td><td>${esc(item.description)}</td><td>${
+      item.due_date ? `<span class="badge overdue-soft">Checked out</span> <span class="muted small">due back ${esc(formatDate(item.due_date))}</span>` : '<span class="badge ontime">Available</span>'
+    }</td></tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+        )
+        .join('')
+    : '<p class="card empty">Nothing is listed yet.</p>'
+}`,
   });
 }

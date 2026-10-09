@@ -1003,3 +1003,102 @@ test('extension: the phone that checked out can move the date once, up to 7 days
   assert.match(csv, /Original due date/);
   await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), lamp.id);
 });
+
+test('categories, spreadsheet import and label sizes', async () => {
+  const adminCookie = await adminLogin();
+  const teacherCookie = cookiesFrom(await signUp({ name: 'Import Teacher', email: 'import.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+
+  // A category on a single item, and the list of known categories offered when adding another.
+  await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'Cat Test Camera', description: 'Body', category: 'Cameras' } });
+  assert.equal((await db.prepare("SELECT category FROM items WHERE name = 'Cat Test Camera'").get()).category, 'Cameras');
+  assert.match(await (await request('/admin/items', { cookie: adminCookie })).text(), /<option value="Cameras">/);
+  const catItem = await db.prepare("SELECT * FROM items WHERE name = 'Cat Test Camera'").get();
+  await request(`/admin/items/${catItem.id}`, { method: 'POST', cookie: adminCookie, form: { name: 'Cat Test Camera', category: 'Photo gear', active: '1' } });
+  assert.equal((await db.prepare('SELECT category FROM items WHERE id = ?').get(catItem.id)).category, 'Photo gear');
+
+  // Import: header row, quoted commas, tabs, blank lines, missing names, and a category.
+  const csv = [
+    'Name,Description,Category',
+    'Import Tripod,"Aluminium, with bag",Photo gear',
+    '',
+    'Import Table\t6 ft\tFurniture',
+    ',no name,Furniture',
+    '"Import ""Quote"" Speaker",,Audio',
+  ].join('\r\n');
+  const done = await request('/admin/items/import', { method: 'POST', cookie: teacherCookie, form: { csv } });
+  assert.equal(done.status, 303);
+  assert.match(done.headers.get('location'), /imported=3&skipped=1/);
+  const imported = await db.prepare("SELECT name, description, category, owner_id, school_id FROM items WHERE name LIKE 'Import %' ORDER BY id").all();
+  assert.deepEqual(imported.map((row) => [row.name, row.description, row.category]), [
+    ['Import Tripod', 'Aluminium, with bag', 'Photo gear'],
+    ['Import Table', '6 ft', 'Furniture'],
+    ['Import "Quote" Speaker', '', 'Audio'],
+  ]);
+  const teacherId = (await db.prepare('SELECT id FROM users WHERE email = ?').get('import.teacher@example.edu')).id;
+  assert.ok(imported.every((row) => row.owner_id === teacherId && row.school_id === 1));
+  assert.match(await (await request('/admin/items?saved=imported&imported=3&skipped=1', { cookie: teacherCookie })).text(), /3 items added, 1 skipped/);
+  // The teacher sees only their own items; the admin sees them all.
+  assert.doesNotMatch(await (await request('/admin/items', { cookie: teacherCookie })).text(), /Cat Test Camera/);
+
+  // At most 100 at a time.
+  const many = Array.from({ length: 105 }, (_, i) => `Bulk ${i}`).join('\n');
+  const big = await request('/admin/items/import', { method: 'POST', cookie: adminCookie, form: { csv: many } });
+  assert.match(big.headers.get('location'), /imported=100&skipped=5/);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM items WHERE name LIKE 'Bulk %'").get()).n, 100);
+  assert.equal((await request('/admin/items/import', { method: 'POST', form: { csv: 'x' } })).status, 401);
+
+  // Label sizes.
+  const qr = (size) => request(`/admin/qr${size === undefined ? '' : `?size=${size}`}`, { cookie: adminCookie });
+  assert.match(await (await qr()).text(), /qr-sheet size-medium/);
+  assert.match(await (await qr('tiny')).text(), /qr-sheet size-tiny/);
+  assert.match(await (await qr('large')).text(), /qr-sheet size-large/);
+  assert.match(await (await qr('evil"><script>')).text(), /qr-sheet size-medium/);
+});
+
+test('the what-is-available page: opt-in link, no names, school only', async () => {
+  const adminCookie = await adminLogin();
+  const teacherCookie = cookiesFrom(await signUp({ name: 'Link Teacher', email: 'link.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+  const board = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Avail <b>Board</b>', category: 'Games' }));
+  await createItem(db, { name: 'Avail Chess', category: 'Games' });
+
+  // Off by default, and only admins can switch it on.
+  const linkOf = async (cookie) => (await (await request('/admin/items', { cookie })).text()).match(/value="([^"]*\/available\/[^"]+)"/)?.[1];
+  assert.equal(await linkOf(adminCookie), undefined);
+  assert.equal((await request('/admin/availability', { method: 'POST', cookie: teacherCookie, form: { action: 'new' } })).status, 403);
+  assert.doesNotMatch(await (await request('/admin/items', { cookie: teacherCookie })).text(), /What's available link/);
+
+  await request('/admin/availability', { method: 'POST', cookie: adminCookie, form: { action: 'new' } });
+  const link = (await linkOf(adminCookie)).replaceAll('&amp;', '&');
+  const path = new URL(link).pathname;
+  let page = await (await request(path)).text();
+  assert.match(page, /Avail Chess/);
+  assert.match(page, /Games/);
+  assert.match(page, /Rowland Hall organization drawer/);
+  assert.doesNotMatch(page, /<b>Board<\/b>/);
+  assert.match(page, /Avail &lt;b&gt;Board&lt;\/b&gt;/);
+
+  // Checked-out items show as out, with no student details.
+  await checkoutFor(board, { student_name: 'Secret Student', student_id: '1212', email: 'secret.student@example.edu' });
+  page = await (await request(path)).text();
+  assert.match(page, /Checked out/);
+  assert.doesNotMatch(page, /Secret Student|1212|secret\.student/);
+  await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), board.id);
+
+  // Another school's link does not show these items. A new link kills the old one. Off kills it too.
+  const otherSchool = await createSchool(db, { name: 'Avail Other School' });
+  const otherAdmin = cookiesFrom(await signUp({ name: 'Avail Other', email: 'avail.other@example.edu', password: 'long-enough-password' }, (await db.prepare('SELECT admin_code FROM schools WHERE id = ?').get(otherSchool)).admin_code));
+  await request('/admin/availability', { method: 'POST', cookie: otherAdmin, form: { action: 'new' } });
+  const otherPath = new URL((await linkOf(otherAdmin)).replaceAll('&amp;', '&')).pathname;
+  const otherPage = await (await request(otherPath)).text();
+  assert.match(otherPage, /Avail Other School/);
+  assert.doesNotMatch(otherPage, /Avail Chess/);
+
+  await request('/admin/availability', { method: 'POST', cookie: adminCookie, form: { action: 'new' } });
+  assert.equal((await request(path)).status, 404);
+  const fresh = new URL((await linkOf(adminCookie)).replaceAll('&amp;', '&')).pathname;
+  assert.equal((await request(fresh)).status, 200);
+  await request('/admin/availability', { method: 'POST', cookie: adminCookie, form: { action: 'off' } });
+  assert.equal((await request(fresh)).status, 404);
+  assert.equal((await request('/available/short')).status, 404);
+  assert.equal((await request('/available/aaaaaaaaaaaaaaaaaaaa')).status, 404);
+});
