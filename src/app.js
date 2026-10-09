@@ -115,6 +115,12 @@ export function createApp({
   const markReturned = db.prepare(
     'UPDATE checkouts SET returned_at = ?, returned_by = ?, return_notes = ? WHERE id = ? AND returned_at IS NULL'
   );
+  // A record of who changed what, shown to the school's administrators.
+  const audit = (schoolId, actor, action, detail = '') =>
+    db
+      .prepare('INSERT INTO audit_log (school_id, at, actor, action, detail) VALUES (?, ?, ?, ?, ?)')
+      .run(schoolId, new Date().toISOString(), String(actor).slice(0, 120), action, String(detail).slice(0, 300));
+  const staffActor = (user) => `${user.name} (${user.role})`;
   const RETURN_NOTES_MAX = 300;
   // One extension of up to this many days, by the student who has the item.
   const EXTENSION_DAYS = 7;
@@ -202,7 +208,15 @@ export function createApp({
     res.redirect(`/i/${code}`);
   });
 
-  app.get('/healthz', (req, res) => res.type('text').send('ok'));
+  // For uptime checks. It also asks the database a question, so a free database that went to sleep wakes up.
+  app.get('/healthz', async (req, res) => {
+    try {
+      await db.prepare('SELECT 1 AS ok').get();
+      res.type('text').send('ok');
+    } catch {
+      res.status(503).type('text').send('database unavailable');
+    }
+  });
 
   // The scan page uses a small open-source QR reader (jsQR) on phones that have no built-in one.
   app.get('/scan', async (req, res) => res.send(views.scanPage()));
@@ -308,6 +322,8 @@ export function createApp({
       throw error;
     }
 
+    await audit(item.school_id, 'a student', 'checkout.out', `${item.name}: checked out by ${values.student_name}, due ${values.due_date}`);
+
     // Someone who was waiting for this item and now has it comes off the waiting list.
     await db.prepare('DELETE FROM waitlist WHERE item_id = ? AND lower(email) = ?').run(item.id, values.email);
 
@@ -377,6 +393,7 @@ export function createApp({
     await db
       .prepare('UPDATE checkouts SET due_date = ?, original_due_date = COALESCE(original_due_date, due_date), extended = 1 WHERE id = ? AND returned_at IS NULL')
       .run(newDate, checkout.id);
+    await audit(item.school_id, 'a student', 'checkout.extend', `${item.name}: ${checkout.student_name} moved the return date from ${checkout.due_date} to ${newDate}`);
     res.redirect(303, `/i/${item.code}?extended=1`);
   });
 
@@ -411,7 +428,9 @@ export function createApp({
       }
     }
 
-    await markReturned.run(new Date().toISOString(), 'student', text(req.body?.return_notes, RETURN_NOTES_MAX), checkout.id);
+    const studentNotes = text(req.body?.return_notes, RETURN_NOTES_MAX);
+    await markReturned.run(new Date().toISOString(), 'student', studentNotes, checkout.id);
+    await audit(item.school_id, 'a student', 'checkout.return', `${item.name}: returned by ${checkout.student_name}${studentNotes ? ` (note: ${studentNotes})` : ''}`);
     await returnLimiter.clear(limiterKey);
     res.clearCookie(returnCookieName(item), cookieOptions(req, { sameSite: 'lax', path: `/i/${item.code}` }));
     res.send(views.returnedPage({ item }));
@@ -507,6 +526,7 @@ export function createApp({
       if (String(error.message).includes('UNIQUE')) return fail(400, ['An account with this email already exists. Log in instead.']);
       throw error;
     }
+    await audit(schoolId, `${values.name} (${role})`, 'person.join', `${values.email} signed up`);
     startSession(req, res, userId, passwordHash);
     res.redirect(303, role === 'admin' ? '/admin' : '/admin/items');
   });
@@ -709,10 +729,12 @@ export function createApp({
     const params = [Number(req.params.id)];
     ownerScope(req.user, where, params);
     const checkout = await db
-      .prepare(`SELECT c.id FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
+      .prepare(`SELECT c.id, c.student_name, i.name AS item_name FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
       .get(...params);
     if (!checkout) return res.status(404).type('text').send('Check-out not found');
-    await markReturned.run(new Date().toISOString(), req.user.role, text(req.body?.return_notes, RETURN_NOTES_MAX), checkout.id);
+    const staffNotes = text(req.body?.return_notes, RETURN_NOTES_MAX);
+    await markReturned.run(new Date().toISOString(), req.user.role, staffNotes, checkout.id);
+    await audit(req.user.school_id, staffActor(req.user), 'checkout.return', `${checkout.item_name}: marked returned, was with ${checkout.student_name}${staffNotes ? ` (note: ${staffNotes})` : ''}`);
     res.redirect(303, '/admin');
   });
 
@@ -721,7 +743,7 @@ export function createApp({
     const params = [Number(req.params.id)];
     ownerScope(req.user, where, params);
     const checkout = await db
-      .prepare(`SELECT c.id FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
+      .prepare(`SELECT c.id, c.due_date, c.student_name, i.name AS item_name FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
       .get(...params);
     if (!checkout) return res.status(404).type('text').send('Check-out not found');
     const newDate = text(req.body?.due_date, 10);
@@ -729,6 +751,7 @@ export function createApp({
       await db
         .prepare('UPDATE checkouts SET due_date = ?, original_due_date = COALESCE(original_due_date, due_date), extended = 1 WHERE id = ?')
         .run(newDate, checkout.id);
+      await audit(req.user.school_id, staffActor(req.user), 'checkout.due', `${checkout.item_name}: return date for ${checkout.student_name} changed from ${checkout.due_date} to ${newDate}`);
     }
     res.redirect(303, '/admin');
   });
@@ -899,6 +922,7 @@ export function createApp({
       });
       imported += 1;
     }
+    await audit(req.user.school_id, staffActor(req.user), 'item.import', `${imported} item${imported === 1 ? '' : 's'} imported`);
     res.redirect(303, `/admin/items?saved=imported&imported=${imported}&skipped=${skipped}`);
   });
 
@@ -907,6 +931,7 @@ export function createApp({
     const action = req.body?.action;
     const code = action === 'off' ? null : randomBytes(12).toString('base64url');
     await db.prepare('UPDATE schools SET list_code = ? WHERE id = ?').run(code, req.user.school_id);
+    await audit(req.user.school_id, staffActor(req.user), 'availability', code ? 'Made a new what-is-available link' : 'Turned the what-is-available link off');
     res.redirect(303, '/admin/items?saved=link');
   });
 
@@ -919,6 +944,7 @@ export function createApp({
         .send(await itemsView(req, { values, errors: ['Enter an item name.'] }));
     }
     const itemId = await createItem(db, { ...values, ownerId: req.user.id, schoolId: req.user.school_id });
+    await audit(req.user.school_id, staffActor(req.user), 'item.add', values.name);
     res.redirect(303, `/admin/qr?item=${itemId}&listed=1`);
   });
 
@@ -944,6 +970,12 @@ export function createApp({
       values.active,
       item.id
     );
+    await audit(
+      req.user.school_id,
+      staffActor(req.user),
+      item.active && !values.active ? 'item.retire' : 'item.edit',
+      values.name === item.name ? values.name : `${item.name} is now ${values.name}`
+    );
     res.redirect(303, '/admin/items');
   });
 
@@ -966,8 +998,11 @@ export function createApp({
         .status(409)
         .send(views.deleteItemPage({ user: req.user, item, historyCount: await historyCount(item.id) }));
     }
+    const removed = await historyCount(item.id);
+    await db.prepare('DELETE FROM waitlist WHERE item_id = ?').run(item.id);
     await db.prepare('DELETE FROM checkouts WHERE item_id = ?').run(item.id);
     await db.prepare('DELETE FROM items WHERE id = ?').run(item.id);
+    await audit(req.user.school_id, staffActor(req.user), 'item.delete', `${item.name} (and ${removed} check-out record${removed === 1 ? '' : 's'})`);
     res.redirect(303, '/admin/items');
   });
 
@@ -997,12 +1032,160 @@ export function createApp({
     );
   });
 
+  // Fix a typo in a student's details. Optionally fix every check-out of theirs at this school (a merge).
+  const findCheckoutForEdit = async (user, id) => {
+    const where = ['c.id = ?'];
+    const params = [id];
+    ownerScope(user, where, params);
+    return db
+      .prepare(`SELECT c.*, i.name AS item_name FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
+      .get(...params);
+  };
+
+  admin.get('/checkouts/:id/edit', requireAdmin, async (req, res) => {
+    const checkout = await findCheckoutForEdit(req.user, Number(req.params.id));
+    if (!checkout) return res.status(404).type('text').send('Check-out not found');
+    res.send(views.editCheckoutPage({ user: req.user, checkout }));
+  });
+
+  admin.post('/checkouts/:id/edit', requireAdmin, async (req, res) => {
+    const checkout = await findCheckoutForEdit(req.user, Number(req.params.id));
+    if (!checkout) return res.status(404).type('text').send('Check-out not found');
+    const values = {
+      student_name: text(req.body?.student_name, 100),
+      student_id: text(req.body?.student_id, 20),
+      email: text(req.body?.email, 254).toLowerCase(),
+      phone: text(req.body?.phone, 30),
+    };
+    const errors = [];
+    if (!values.student_name) errors.push('Enter the full name.');
+    if (!values.student_id) errors.push('Enter the student ID (lunch number).');
+    else if (!/^[A-Za-z0-9-]+$/.test(values.student_id)) errors.push('Student ID can only contain letters, numbers and dashes.');
+    if (!EMAIL_PATTERN.test(values.email)) errors.push('Enter a valid email address.');
+    if (values.phone && !PHONE_PATTERN.test(values.phone)) errors.push('Enter a valid phone number, or leave it empty.');
+    if (errors.length) {
+      return res.status(400).send(views.editCheckoutPage({ user: req.user, checkout: { ...checkout, ...values }, errors }));
+    }
+    const all = req.body?.apply_all === '1';
+    let changed = 1;
+    if (all) {
+      // Every check-out at this school with the same email or student ID as the one being fixed.
+      changed = (
+        await db
+          .prepare(
+            `UPDATE checkouts SET student_name = ?, student_id = ?, email = ?, phone = ?
+              WHERE id IN (SELECT c2.id FROM checkouts c2 JOIN items i ON i.id = c2.item_id
+                            WHERE i.school_id = ? AND (lower(c2.email) = lower(?) OR lower(c2.student_id) = lower(?)))`
+          )
+          .run(values.student_name, values.student_id, values.email, values.phone, req.user.school_id, checkout.email, checkout.student_id)
+      ).changes;
+    } else {
+      await db
+        .prepare('UPDATE checkouts SET student_name = ?, student_id = ?, email = ?, phone = ? WHERE id = ?')
+        .run(values.student_name, values.student_id, values.email, values.phone, checkout.id);
+    }
+    await audit(
+      req.user.school_id,
+      staffActor(req.user),
+      'checkout.fix',
+      `${checkout.student_name} (${checkout.student_id}) is now ${values.student_name} (${values.student_id}), ${changed} check-out${changed === 1 ? '' : 's'}`
+    );
+    res.redirect(303, '/admin/history');
+  });
+
+  // How long returned check-outs are kept. 0 keeps them forever.
+  admin.post('/retention', requireAdmin, async (req, res) => {
+    const years = [0, 1, 2, 3, 5].includes(Number(req.body?.years)) ? Number(req.body.years) : 0;
+    await db.prepare('UPDATE schools SET retention_years = ? WHERE id = ?').run(years, req.user.school_id);
+    await audit(req.user.school_id, staffActor(req.user), 'retention', years ? `Keep returned check-outs for ${years} year${years === 1 ? '' : 's'}` : 'Keep returned check-outs forever');
+    res.redirect(303, '/admin/people?saved=retention');
+  });
+
+  // Reports: what is borrowed, what is late, and when.
+  admin.get('/reports', async (req, res) => {
+    const days = [30, 90, 365, 0].includes(Number(req.query.days)) ? Number(req.query.days) : 90;
+    const today = todayLocal();
+    const where = [];
+    const params = [];
+    ownerScope(req.user, where, params);
+    if (days) {
+      where.push('c.checked_out_at >= ?');
+      params.push(new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString());
+    }
+    const rows = await db
+      .prepare(
+        `SELECT c.item_id, i.name AS item_name, c.student_name, c.email, c.checked_out_at, c.due_date, c.returned_at
+           FROM checkouts c JOIN items i ON i.id = c.item_id
+          WHERE ${where.join(' AND ')} ORDER BY c.checked_out_at DESC LIMIT 20000`
+      )
+      .all(...params);
+
+    const isLate = (row) => (row.returned_at ? new Date(row.returned_at).toLocaleDateString('en-CA') > row.due_date : row.due_date < today);
+    const byItem = new Map();
+    const byPerson = new Map();
+    const weekdays = Array(7).fill(0);
+    const hours = Array(24).fill(0);
+    let kept = 0;
+    let keptCount = 0;
+    for (const row of rows) {
+      byItem.set(row.item_id, { name: row.item_name, count: (byItem.get(row.item_id)?.count ?? 0) + 1 });
+      if (isLate(row)) {
+        const key = row.email.toLowerCase();
+        const entry = byPerson.get(key) ?? { name: row.student_name, email: row.email, late: 0 };
+        entry.late += 1;
+        byPerson.set(key, entry);
+      }
+      const when = new Date(row.checked_out_at);
+      weekdays[(when.getDay() + 6) % 7] += 1;
+      hours[when.getHours()] += 1;
+      if (row.returned_at) {
+        kept += (new Date(row.returned_at) - when) / (24 * 60 * 60 * 1000);
+        keptCount += 1;
+      }
+    }
+    // Items nobody borrowed in this period.
+    const itemWhere = ['i.active = 1'];
+    const itemParams = [];
+    ownerScope(req.user, itemWhere, itemParams);
+    const items = await db.prepare(`SELECT i.id, i.name FROM items i WHERE ${itemWhere.join(' AND ')}`).all(...itemParams);
+    const report = {
+      days,
+      total: rows.length,
+      returned: rows.filter((row) => row.returned_at).length,
+      lateCount: rows.filter(isLate).length,
+      averageDays: keptCount ? kept / keptCount : null,
+      popular: [...byItem.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)).slice(0, 10),
+      unused: items.filter((item) => !byItem.has(item.id)).map((item) => item.name).sort().slice(0, 15),
+      unusedTotal: items.filter((item) => !byItem.has(item.id)).length,
+      late: [...byPerson.values()].sort((a, b) => b.late - a.late || a.name.localeCompare(b.name)).slice(0, 10),
+      weekdays,
+      hours,
+    };
+    res.send(views.reportsPage({ user: req.user, report }));
+  });
+
+  // The activity log: who changed what, newest first. Administrators only, for their own school.
+  admin.get('/log', requireAdmin, async (req, res) => {
+    const q = text(req.query.q, 100);
+    const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+    const rows = await db
+      .prepare(
+        `SELECT id, at, actor, action, detail FROM audit_log
+          WHERE school_id = ? ${q ? "AND (actor LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR action LIKE ? ESCAPE '\\')" : ''}
+          ORDER BY id DESC LIMIT 300`
+      )
+      .all(...[req.user.school_id, ...(q ? [like, like, like] : [])]);
+    res.send(views.logPage({ user: req.user, rows, q }));
+  });
+
   admin.get('/people', requireAdmin, async (req, res) => {
     const people = await db
       .prepare('SELECT id, name, email, role, active, created_at FROM users WHERE school_id = ? ORDER BY role, name COLLATE NOCASE')
       .all(req.user.school_id);
-    const school = await db.prepare('SELECT name, admin_code, teacher_code FROM schools WHERE id = ?').get(req.user.school_id);
-    res.send(views.peoplePage({ user: req.user, people, school }));
+    const school = await db
+      .prepare('SELECT name, admin_code, teacher_code, retention_years FROM schools WHERE id = ?')
+      .get(req.user.school_id);
+    res.send(views.peoplePage({ user: req.user, people, school, notice: text(req.query.saved, 20) }));
   });
 
   admin.get('/people/:id/delete', requireAdmin, async (req, res) => {
@@ -1018,9 +1201,10 @@ export function createApp({
     const personId = Number(req.params.id);
     // Your own account is removed from Settings, which asks for your password.
     if (personId === req.user.id) return res.redirect(303, '/admin/settings/delete');
-    const person = await db.prepare('SELECT id FROM users WHERE id = ? AND school_id = ?').get(personId, req.user.school_id);
+    const person = await db.prepare('SELECT id, name, email FROM users WHERE id = ? AND school_id = ?').get(personId, req.user.school_id);
     if (!person) return res.status(404).type('text').send('Account not found');
     await removeAccount(person.id);
+    await audit(req.user.school_id, staffActor(req.user), 'person.delete', `${person.name} (${person.email})`);
     res.redirect(303, '/admin/people');
   });
 
@@ -1035,6 +1219,7 @@ export function createApp({
     if (!person) return res.status(404).type('text').send('Account not found');
     const temporary = temporaryPassword();
     await db.prepare('UPDATE users SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(temporary), person.id);
+    await audit(req.user.school_id, staffActor(req.user), 'person.reset', `${person.name} (${person.email})`);
     res.send(views.tempPasswordPage({ user: req.user, person, temporary, back: '/admin/people', backLabel: 'People' }));
   });
 
@@ -1045,6 +1230,7 @@ export function createApp({
     await db
       .prepare('UPDATE users SET active = ? WHERE id = ? AND school_id = ?')
       .run(req.body?.active === '1' ? 1 : 0, personId, req.user.school_id);
+    await audit(req.user.school_id, staffActor(req.user), req.body?.active === '1' ? 'person.reactivate' : 'person.deactivate', `account #${personId}`);
     res.redirect(303, '/admin/people');
   });
 

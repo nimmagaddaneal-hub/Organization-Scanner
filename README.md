@@ -181,6 +181,37 @@ When an item is checked out, a student can open **Tell me when it is back** and 
 
 Not built: item photos. They would need image storage, and the free database is small.
 
+## Reports
+
+**Reports** in the menu: check-outs in the last 30 or 90 days, last year, or all time, with the number returned, the number late, and the average days an item is kept. Then the most borrowed items, who is late most often (with their email), the busiest weekdays and hours, and items nobody borrowed. Administrators see their whole school, teachers only their own items. Hours use the server's time zone, so set `TZ`.
+
+## Activity log
+
+**Log** in the menu (administrators only) lists who did what at the school, newest first, 300 at a time, with search: items added, edited, retired, deleted or imported, check-outs and returns (by a student or by staff), changed return dates, extensions, fixed details, password resets, account changes, and changes to the record-keeping and availability link. It never shows another school's entries.
+
+## Fixing a student's details
+
+On **History**, administrators get **Fix details** on each row. It corrects the name, ID, email or phone on that check-out, or, with the box ticked, on every check-out at the school with the same old email or ID. That also merges two spellings of one student into one.
+
+## How long records are kept
+
+On **People**, administrators choose **How long to keep records**: forever (the default), or 1, 2, 3 or 5 years. Once a day, returned check-outs older than that (and the activity log entries older than that) are deleted for that school. Items still out are never deleted. Whatever the setting, waiting-list entries older than six months are deleted, and expired rate-limit counts are cleaned up. The cleanup also runs when the server starts.
+
+## Staying awake (free uptime ping)
+
+The free Render plan puts the site to sleep after 15 minutes without visitors, and the next visitor waits 30 to 60 seconds. A free pinger visiting the site every 5 minutes keeps it awake:
+
+1. Sign up at <https://uptimerobot.com> (free plan).
+2. **Add New Monitor**: type **HTTP(s)**, URL `https://YOUR-SITE/healthz`, interval 5 minutes.
+3. `/healthz` also asks the database a question, so a free Turso database that has gone to sleep wakes up too. It answers `ok`, or `503` if the database cannot be reached, so UptimeRobot can also email you when the site is down.
+
+Check Render's current free-plan rules before relying on this; one site running all month fits in the free hours, but terms can change. The paid plan (about $7 a month) never sleeps.
+
+## Security extras
+
+- **Log out of all devices:** in **Settings**. It ends every login of your account except the one you are using. Changing or resetting your password does the same.
+- **Attempt limits survive a restart.** The limits on wrong passwords, sign-ups, demo requests and return guesses are kept in the database, not in the server's memory.
+
 ## Reminders for late items
 
 On the dashboard, every late row has an **Email reminder** button, and the top has **Email everyone late** (everyone is on Bcc, so addresses stay private). They open your own email app with the message already written. Nothing is sent by the site, so no email service is needed.
@@ -307,6 +338,8 @@ Run these by hand after setup or after any change:
 - [ ] Import a few items from a pasted spreadsheet. Print **Codes** at a different label size.
 - [ ] Create the **What's available** link on **Items**, open it in a private window: no names are shown.
 - [ ] On a checked-out item, join the waiting list from another phone. It shows on **Waitlist**; **Email them** opens your mail app; checking the item out removes the person.
+- [ ] Open **Reports** and **Log** (as an administrator): your recent activity is listed. On **History**, press **Fix details** on a row.
+- [ ] On **People**, choose a record-keeping time. In **Settings**, press **Log out everywhere else** and check a second phone is logged out.
 - [ ] Open `/privacy` from the footer and from both sign-up forms.
 - [ ] With `OWNER_PASSWORD` set, log in at `/owner`: add a school, read the demo request, find a student, reset their password, and erase them.
 - [ ] On the home page, send a demo request. It arrives in your own inbox. It is not visible anywhere in the admin pages.

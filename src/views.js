@@ -23,9 +23,11 @@ export function formatDate(day) {
 const STAFF_LINKS = [
   ['dashboard', '/admin', 'Checked out'],
   ['history', '/admin/history', 'History'],
+  ['reports', '/admin/reports', 'Reports'],
   ['items', '/admin/items', 'Items'],
   ['waitlist', '/admin/waitlist', 'Waitlist'],
   ['codes', '/admin/qr', 'Codes'],
+  ['log', '/admin/log', 'Log', 'admin'],
   ['people', '/admin/people', 'People', 'admin'],
 ];
 
@@ -494,7 +496,7 @@ ${errorList(errors)}
   });
 }
 
-export function peoplePage({ user, people, school }) {
+export function peoplePage({ user, people, school, notice = '' }) {
   return layout({
     title: 'People',
     user,
@@ -502,6 +504,21 @@ export function peoplePage({ user, people, school }) {
     wide: true,
     body: `<h1>People</h1>
 <p class="page-sub">Staff accounts at ${esc(school.name)}. Only your school's staff are listed.</p>
+${notice === 'retention' ? '<div class="alert success" role="status">Saved.</div>' : ''}
+<section class="card">
+  <h2>How long to keep records</h2>
+  <p class="muted small">Returned check-outs hold students' names, IDs and emails. Choose how long to keep them. Older ones are deleted automatically, once a day. Items still out are never deleted. The activity log follows the same rule.</p>
+  <form method="post" action="/admin/retention" class="inline-label-form">
+    <label class="inline-label">Keep returned check-outs
+      <select name="years" aria-label="How long to keep records">
+        ${[[0, 'Forever'], [1, '1 year'], [2, '2 years'], [3, '3 years'], [5, '5 years']]
+          .map(([value, label]) => `<option value="${value}" ${school.retention_years === value ? 'selected' : ''}>${label}</option>`)
+          .join('')}
+      </select>
+    </label>
+    <button class="secondary small">Save</button>
+  </form>
+</section>
 <section class="card">
   <h2>Sign-up codes</h2>
   <p class="muted small">Staff join your school at <code>/admin/signup</code> with one of these codes. Give the teacher code to teachers. Keep the admin code to yourself: an administrator sees every item and student record in the school.</p>
@@ -652,9 +669,10 @@ ${body}`,
 }
 
 export function historyPage({ user, rows, q, status, today }) {
+  const canFix = user.role === 'admin';
   const body = rows.length
     ? `<div class="table-wrap"><table>
-<thead><tr><th>Item</th><th>Student</th><th>Student ID</th><th>Email</th><th>Checked out</th><th>Due</th><th>Returned</th><th>Return notes</th><th>Status</th></tr></thead>
+<thead><tr><th>Item</th><th>Student</th><th>Student ID</th><th>Email</th><th>Checked out</th><th>Due</th><th>Returned</th><th>Return notes</th><th>Status</th>${canFix ? '<th class="no-print"></th>' : ''}</tr></thead>
 <tbody>
 ${rows
   .map(
@@ -668,6 +686,7 @@ ${rows
   <td>${row.returned_at ? `${esc(formatDateTime(row.returned_at))}<div class="muted small">by ${esc(row.returned_by)}</div>` : ''}</td>
   <td>${row.return_notes ? `<span class="badge overdue-soft">Note</span> ${esc(row.return_notes)}` : ''}</td>
   <td>${statusBadge(row, today)}</td>
+  ${canFix ? `<td class="no-print"><a class="small" href="/admin/checkouts/${row.id}/edit">Fix details</a></td>` : ''}
 </tr>`
   )
   .join('')}
@@ -1073,7 +1092,9 @@ export function privacyPage({ user = null } = {}) {
 <section class="card prose">
   <h2>Keeping and deleting records</h2>
   <ul>
-    <li>Records are kept while your school uses the service, so that staff can see what is out and what was returned.</li>
+    <li>Records are kept while your school uses the service, so that staff can see what is out and what was returned. A school's administrator can choose to have returned check-outs deleted automatically after 1, 2, 3 or 5 years.</li>
+    <li>Waiting-list entries are deleted after six months at the latest.</li>
+    <li>A school's administrators can see an activity log of changes made by staff and students at their school (for example an item returned, or a return date changed). It is kept under the same time limit.</li>
     <li>Teachers and administrators can delete their own account in Settings. Check-out history is kept by the school.</li>
     <li>To have your details erased from past check-outs, ask your school's administrator, who can ask the person who runs the site. Your check-outs then stay as anonymous history, with no name, ID, email or phone.</li>
   </ul>
@@ -1417,5 +1438,160 @@ ${entry.people
         .join('')
     : '<p class="card empty">Nobody is waiting for anything.</p>'
 }`,
+  });
+}
+
+// ---------- Activity log ----------
+
+const LOG_LABELS = {
+  'item.add': 'Item added',
+  'item.import': 'Items imported',
+  'item.edit': 'Item edited',
+  'item.retire': 'Item retired',
+  'item.delete': 'Item deleted',
+  'checkout.out': 'Checked out',
+  'checkout.return': 'Returned',
+  'checkout.due': 'Return date changed',
+  'checkout.extend': 'Extended by student',
+  'checkout.fix': 'Student details fixed',
+  'person.join': 'Staff joined',
+  'person.delete': 'Account deleted',
+  'person.reset': 'Password reset',
+  'person.deactivate': 'Account deactivated',
+  'person.reactivate': 'Account reactivated',
+  availability: 'Availability link',
+  retention: 'Record keeping changed',
+};
+
+export function logPage({ user, rows, q }) {
+  return layout({
+    title: 'Activity log',
+    user,
+    active: 'log',
+    wide: true,
+    body: `<div class="page-head"><div><h1>Activity log</h1><p class="page-sub">Who changed what at ${esc(user.school_name)}, newest first. The latest 300 entries.</p></div></div>
+<form method="get" action="/admin/log" class="filters no-print">
+  <input type="search" name="q" value="${esc(q)}" placeholder="Search who, what or which item" aria-label="Search">
+  <button class="secondary">Search</button>
+  ${q ? '<a href="/admin/log">Clear</a>' : ''}
+</form>
+${
+  rows.length
+    ? `<div class="table-wrap"><table>
+<thead><tr><th>When</th><th>Who</th><th>What</th><th>Details</th></tr></thead>
+<tbody>
+${rows
+  .map(
+    (row) => `<tr>
+  <td>${esc(formatDateTime(row.at))}</td>
+  <td>${esc(row.actor)}</td>
+  <td><span class="badge returned">${esc(LOG_LABELS[row.action] ?? row.action)}</span></td>
+  <td>${esc(row.detail)}</td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+    : `<p class="card empty">${q ? 'No entries match this search.' : 'Nothing recorded yet.'}</p>`
+}`,
+  });
+}
+
+// ---------- Fix a student's details ----------
+
+export function editCheckoutPage({ user, checkout, errors = [] }) {
+  return layout({
+    title: 'Fix student details',
+    user,
+    active: 'history',
+    body: `<h1>Fix student details</h1>
+<p class="page-sub">From the check-out of <strong>${esc(checkout.item_name)}</strong> on ${esc(formatDate(String(checkout.checked_out_at).slice(0, 10)))}.</p>
+${errorList(errors)}
+<form method="post" action="/admin/checkouts/${checkout.id}/edit" class="card" novalidate>
+  <label>Full name <span class="required">*</span>
+    <input type="text" name="student_name" value="${esc(checkout.student_name)}" maxlength="100" required>
+  </label>
+  <label>Student ID (lunch number) <span class="required">*</span>
+    <input type="text" name="student_id" value="${esc(checkout.student_id)}" maxlength="20" required>
+  </label>
+  <label>School email <span class="required">*</span>
+    <input type="email" name="email" value="${esc(checkout.email)}" maxlength="254" required>
+  </label>
+  <label>Phone number <span class="muted">(optional)</span>
+    <input type="tel" name="phone" value="${esc(checkout.phone)}" maxlength="30">
+  </label>
+  <label class="checkbox">
+    <input type="checkbox" name="apply_all" value="1">
+    Fix every check-out at this school with the same email or student ID as before. This also merges two spellings of the same student into one.
+  </label>
+  <button class="primary">Save</button>
+  <a href="/admin/history">Cancel</a>
+</form>`,
+  });
+}
+
+// ---------- Reports ----------
+
+function barRows(labels, values) {
+  const max = Math.max(1, ...values);
+  return `<div class="bars">${labels
+    .map(
+      (label, index) => `<div class="bar-row"><span class="bar-label">${esc(label)}</span><span class="bar-track"><span class="bar-fill" data-w="${Math.round((values[index] / max) * 100)}"></span></span><span class="bar-value">${values[index]}</span></div>`
+    )
+    .join('')}</div>`;
+}
+
+export function reportsPage({ user, report }) {
+  const periods = [[30, 'Last 30 days'], [90, 'Last 90 days'], [365, 'Last year'], [0, 'All time']];
+  const hourLabels = Array.from({ length: 24 }, (_, hour) => `${hour % 12 || 12}${hour < 12 ? ' am' : ' pm'}`);
+  const busyHours = report.hours.map((count, hour) => ({ count, hour })).filter(({ hour }) => hour >= 6 && hour <= 20);
+  return layout({
+    title: 'Reports',
+    user,
+    active: 'reports',
+    wide: true,
+    body: `<div class="page-head"><div><h1>Reports</h1><p class="page-sub">${user.role === 'admin' ? `All of ${esc(user.school_name)}` : 'Your items'}.</p></div>
+  <form method="get" action="/admin/reports" class="size-form no-print">
+    <label class="inline-label">Period
+      <select name="days" aria-label="Period" data-autosubmit>
+        ${periods.map(([value, label]) => `<option value="${value}" ${report.days === value ? 'selected' : ''}>${label}</option>`).join('')}
+      </select>
+    </label>
+    <noscript><button class="secondary small">Show</button></noscript>
+  </form>
+</div>
+<div class="stats">
+  <div class="stat"><div class="value">${report.total}</div><div class="label">Check-outs</div></div>
+  <div class="stat"><div class="value">${report.returned}</div><div class="label">Returned</div></div>
+  <div class="stat ${report.lateCount ? 'alert-stat' : ''}"><div class="value">${report.lateCount}</div><div class="label">Late (returned late, or late now)</div></div>
+  <div class="stat"><div class="value">${report.averageDays === null ? '-' : report.averageDays.toFixed(1)}</div><div class="label">Average days kept</div></div>
+</div>
+<div class="report-grid">
+  <section class="card"><h2>Most borrowed</h2>
+    ${report.popular.length ? barRows(report.popular.map((item) => item.name), report.popular.map((item) => item.count)) : '<p class="muted">Nothing borrowed in this period.</p>'}
+  </section>
+  <section class="card"><h2>Who is late most often</h2>
+    ${
+      report.late.length
+        ? `<div class="table-wrap flat"><table><thead><tr><th>Student</th><th>Email</th><th>Late</th></tr></thead><tbody>${report.late
+            .map((person) => `<tr><td>${esc(person.name)}</td><td>${esc(person.email)}</td><td>${person.late}</td></tr>`)
+            .join('')}</tbody></table></div>`
+        : '<p class="muted">Nobody was late in this period.</p>'
+    }
+  </section>
+  <section class="card"><h2>Busiest days</h2>
+    ${barRows(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], report.weekdays)}
+  </section>
+  <section class="card"><h2>Busiest hours <span class="muted small">(6 am to 8 pm)</span></h2>
+    ${barRows(busyHours.map(({ hour }) => hourLabels[hour]), busyHours.map(({ count }) => count))}
+  </section>
+  <section class="card"><h2>Not borrowed at all <span class="muted small">(${report.unusedTotal})</span></h2>
+    ${
+      report.unused.length
+        ? `<p class="muted small">Items nobody checked out in this period.</p><ul class="plain-list">${report.unused.map((name) => `<li>${esc(name)}</li>`).join('')}</ul>${report.unusedTotal > report.unused.length ? `<p class="muted small">and ${report.unusedTotal - report.unused.length} more.</p>` : ''}`
+        : '<p class="muted">Every item was borrowed at least once.</p>'
+    }
+  </section>
+</div>
+<script src="/reports.js" defer></script>`,
   });
 }

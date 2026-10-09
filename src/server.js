@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { database } from './config.js';
 import { openDb, syncDefaultSchool } from './db.js';
 import { makeDemoNotifier } from './mail.js';
+import { schedulePurge } from './retention.js';
 import { createApp } from './app.js';
 
 let sessionSecret = process.env.SESSION_SECRET;
@@ -55,6 +56,9 @@ const app = createApp({
   baseUrl: process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || '',
   trustProxy: process.env.TRUST_PROXY === '1',
 });
+
+// Removes records older than each school's chosen keep-time, once at start and then daily.
+schedulePurge(db);
 
 const port = Number(process.env.PORT) || 3000;
 app.listen(port, () => {

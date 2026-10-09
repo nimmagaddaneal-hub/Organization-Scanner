@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS waitlist (
 );
 CREATE INDEX IF NOT EXISTS waitlist_by_item ON waitlist(item_id);
 
+-- A record of changes made by staff and students, for each school's administrators.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER NOT NULL REFERENCES schools(id),
+  at        TEXT NOT NULL,
+  actor     TEXT NOT NULL,
+  action    TEXT NOT NULL,
+  detail    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS audit_by_school ON audit_log(school_id, id);
+
 -- Counts of recent attempts (wrong passwords, form submissions), kept so limits survive a restart.
 CREATE TABLE IF NOT EXISTS rate_limits (
   key      TEXT PRIMARY KEY,
@@ -153,6 +164,9 @@ export async function openDb({ url, authToken }) {
     await client.execute("ALTER TABLE items ADD COLUMN category TEXT NOT NULL DEFAULT ''");
   }
   const schoolColumns = (await db.prepare('PRAGMA table_info(schools)').all()).map((column) => column.name);
+  if (!schoolColumns.includes('retention_years')) {
+    await client.execute('ALTER TABLE schools ADD COLUMN retention_years INTEGER NOT NULL DEFAULT 0');
+  }
   if (!schoolColumns.includes('list_code')) {
     await client.execute('ALTER TABLE schools ADD COLUMN list_code TEXT');
   }

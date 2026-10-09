@@ -132,12 +132,12 @@ test('form rejects missing and invalid fields', async () => {
 });
 
 test('every admin route requires the login', async () => {
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete', '/admin/waitlist']) {
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete', '/admin/waitlist', '/admin/log', '/admin/reports', '/admin/checkouts/1/edit']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/admin/login', path);
   }
-  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/waitlist/1/delete', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete', ]) {
+  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/waitlist/1/delete', '/admin/retention', '/admin/checkouts/1/edit', '/admin/settings/logout-everywhere', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete', ]) {
     const response = await request(path, { method: 'POST', form: { name: 'x' } });
     assert.equal(response.status, 401, path);
   }
@@ -1222,4 +1222,165 @@ test('log out of all devices ends every other login but keeps this one', async (
   await request('/admin/settings/logout-everywhere', { method: 'POST', cookie: stillIn });
   assert.equal((await request('/admin/items', { cookie: again })).status, 302);
   assert.equal((await request('/admin/settings/logout-everywhere', { method: 'POST' })).status, 401);
+});
+
+test('activity log: records changes, shows them to the school admin only', async () => {
+  const adminCookie = await adminLogin();
+  const teacherCookie = cookiesFrom(await signUp({ name: 'Log Teacher', email: 'log.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+  assert.equal((await request('/admin/log', { cookie: teacherCookie })).status, 403);
+
+  await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Log <i>Drum</i>' } });
+  const drum = await db.prepare("SELECT * FROM items WHERE name LIKE 'Log %'").get();
+  const out = await checkoutFor(drum, { student_name: 'Dee Drummer', student_id: '1414' });
+  await request(`/i/${drum.code}/return`, { method: 'POST', cookie: out.cookie, form: { return_notes: 'stick missing' } });
+  await request(`/admin/items/${drum.id}`, { method: 'POST', cookie: teacherCookie, form: { name: 'Log Drum Renamed', active: '1' } });
+  await checkoutFor(drum, { student_name: 'Eli Beats', student_id: '1515' });
+  const checkoutId = (await db.prepare('SELECT id FROM checkouts WHERE item_id = ? AND returned_at IS NULL').get(drum.id)).id;
+  await request(`/admin/checkouts/${checkoutId}/due`, { method: 'POST', cookie: adminCookie, form: { due_date: dayFrom(15) } });
+  await request(`/admin/checkouts/${checkoutId}/return`, { method: 'POST', cookie: adminCookie, form: {} });
+  await request(`/admin/items/${drum.id}/delete`, { method: 'POST', cookie: adminCookie });
+
+  const log = await (await request('/admin/log', { cookie: adminCookie })).text();
+  for (const expected of [/Item added/, /Checked out/, /Returned/, /stick missing/, /Item edited/, /Return date changed/, /Item deleted/, /Log Teacher \(teacher\)/, /Test Admin \(admin\)/, /a student/, /Dee Drummer/]) {
+    assert.match(log, expected);
+  }
+  assert.doesNotMatch(log, /<i>Drum<\/i>/);
+  assert.match(await (await request('/admin/log?q=Eli+Beats', { cookie: adminCookie })).text(), /Eli Beats/);
+  assert.doesNotMatch(await (await request('/admin/log?q=Eli+Beats', { cookie: adminCookie })).text(), /Dee Drummer/);
+
+  // Another school's admin sees none of it.
+  const school = await createSchool(db, { name: 'Log Other School' });
+  const otherAdmin = cookiesFrom(await signUp({ name: 'Log Other', email: 'log.other@example.edu', password: 'long-enough-password' }, (await db.prepare('SELECT admin_code FROM schools WHERE id = ?').get(school)).admin_code));
+  const otherLog = await (await request('/admin/log', { cookie: otherAdmin })).text();
+  assert.doesNotMatch(otherLog, /Dee Drummer|Log Drum|Log Teacher/);
+  assert.match(otherLog, /Log Other/);
+});
+
+test('fix a student\'s details: one check-out or all of theirs at this school; admins only', async () => {
+  const adminCookie = await adminLogin();
+  const [a, b, c] = await Promise.all(['Fix Item A', 'Fix Item B', 'Fix Item C'].map(async (name) => db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name }))));
+  await checkoutFor(a, { student_name: 'Tom Typo', student_id: '9090', email: 'tom.typo@example.edu' });
+  await checkoutFor(b, { student_name: 'Tom Typo', student_id: '9090', email: 'tom.typo@example.edu' });
+  await checkoutFor(c, { student_name: 'Someone Else', student_id: '9191', email: 'someone.else@example.edu' });
+  const idOf = async (item) => (await db.prepare('SELECT id FROM checkouts WHERE item_id = ?').get(item.id)).id;
+  const form = { student_name: 'Tom Typo-Fixed', student_id: '9099', email: 'tom.fixed@example.edu', phone: '' };
+
+  assert.match(await (await request('/admin/history', { cookie: adminCookie })).text(), /Fix details/);
+  const teacherCookie = cookiesFrom(await signUp({ name: 'Fix Teacher', email: 'fix.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+  assert.equal((await request(`/admin/checkouts/${await idOf(a)}/edit`, { cookie: teacherCookie })).status, 403);
+  assert.doesNotMatch(await (await request('/admin/history', { cookie: teacherCookie })).text(), /Fix details/);
+
+  // Validation.
+  const bad = await request(`/admin/checkouts/${await idOf(a)}/edit`, { method: 'POST', cookie: adminCookie, form: { ...form, student_name: '', email: 'nope', student_id: 'a b' } });
+  assert.equal(bad.status, 400);
+  assert.match(await bad.text(), /Enter the full name/);
+
+  // One check-out only.
+  assert.equal((await request(`/admin/checkouts/${await idOf(a)}/edit`, { method: 'POST', cookie: adminCookie, form })).status, 303);
+  assert.equal((await db.prepare('SELECT student_name, email FROM checkouts WHERE id = ?').get(await idOf(a))).email, 'tom.fixed@example.edu');
+  assert.equal((await db.prepare('SELECT email FROM checkouts WHERE id = ?').get(await idOf(b))).email, 'tom.typo@example.edu');
+
+  // Every check-out with the same old email or ID: the other spelling is merged in. Others are left alone.
+  const secondForm = { ...form, student_name: 'Tom Merged', apply_all: '1' };
+  assert.equal((await request(`/admin/checkouts/${await idOf(b)}/edit`, { method: 'POST', cookie: adminCookie, form: secondForm })).status, 303);
+  const names = await db.prepare('SELECT item_id, student_name, email FROM checkouts WHERE item_id IN (?, ?, ?) ORDER BY item_id').all(a.id, b.id, c.id);
+  assert.equal(names[1].student_name, 'Tom Merged');
+  assert.equal(names[2].email, 'someone.else@example.edu');
+  assert.match(await (await request('/admin/log', { cookie: adminCookie })).text(), /Student details fixed/);
+
+  // Not another school's records.
+  const school = await createSchool(db, { name: 'Fix Other School' });
+  const otherAdmin = cookiesFrom(await signUp({ name: 'Fix Other', email: 'fix.other@example.edu', password: 'long-enough-password' }, (await db.prepare('SELECT admin_code FROM schools WHERE id = ?').get(school)).admin_code));
+  assert.equal((await request(`/admin/checkouts/${await idOf(c)}/edit`, { cookie: otherAdmin })).status, 404);
+  assert.equal((await request(`/admin/checkouts/${await idOf(c)}/edit`, { method: 'POST', cookie: otherAdmin, form })).status, 404);
+  await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id IN (?, ?, ?)').run(new Date().toISOString(), a.id, b.id, c.id);
+});
+
+test('record keeping: old returned check-outs are deleted for schools that choose it', async () => {
+  const { purgeOldRecords } = await import('../src/retention.js');
+  const adminCookie = await adminLogin();
+  const school = await createSchool(db, { name: 'Keep Other School' });
+  const other = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Keep Other Item', schoolId: school }));
+  const mine = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Keep Mine Item' }));
+  const insert = (item, name, returned) =>
+    db
+      .prepare('INSERT INTO checkouts (item_id, student_name, student_id, email, checked_out_at, due_date, returned_at, return_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(item.id, name, '1', `${name}@example.edu`, '2020-01-01T10:00:00.000Z', '2020-01-05', returned, `t-${name}`);
+  await insert(mine, 'OldReturned', '2020-01-04T10:00:00.000Z');
+  await insert(mine, 'RecentReturned', new Date().toISOString());
+  await insert(other, 'OtherOld', '2020-01-04T10:00:00.000Z');
+
+  // Nothing is deleted until a school chooses a time. Only admins choose.
+  await purgeOldRecords(db);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM checkouts WHERE student_name = 'OldReturned'").get()).n, 1);
+  const teacherCookie = cookiesFrom(await signUp({ name: 'Keep Teacher', email: 'keep.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+  assert.equal((await request('/admin/retention', { method: 'POST', cookie: teacherCookie, form: { years: '1' } })).status, 403);
+  assert.match(await (await request('/admin/people', { cookie: adminCookie })).text(), /How long to keep records/);
+  assert.equal((await request('/admin/retention', { method: 'POST', cookie: adminCookie, form: { years: '2' } })).status, 303);
+  assert.equal((await db.prepare('SELECT retention_years FROM schools WHERE id = 1').get()).retention_years, 2);
+  await request('/admin/retention', { method: 'POST', cookie: adminCookie, form: { years: '99' } });
+  assert.equal((await db.prepare('SELECT retention_years FROM schools WHERE id = 1').get()).retention_years, 0);
+  await request('/admin/retention', { method: 'POST', cookie: adminCookie, form: { years: '2' } });
+
+  // An item still out is kept however old; the other school is untouched.
+  await db.prepare("INSERT INTO checkouts (item_id, student_name, student_id, email, checked_out_at, due_date, return_token) VALUES (?, 'StillOut', '1', 's@e.edu', '2019-01-01T10:00:00.000Z', '2019-01-05', 't-out')").run(mine.id);
+  await db.prepare("INSERT INTO audit_log (school_id, at, actor, action, detail) VALUES (1, '2019-01-01T00:00:00.000Z', 'x', 'item.add', 'ancient')").run();
+  await db.prepare("INSERT INTO waitlist (item_id, name, email, created_at) VALUES (?, 'Stale', 'stale@e.edu', '2019-01-01T00:00:00.000Z')").run(mine.id);
+  const counts = await purgeOldRecords(db);
+  assert.ok(counts.checkouts >= 1 && counts.log >= 1 && counts.waitlist >= 1);
+  const left = (await db.prepare("SELECT student_name FROM checkouts WHERE item_id IN (?, ?)").all(mine.id, other.id)).map((row) => row.student_name).sort();
+  assert.deepEqual(left, ['OtherOld', 'RecentReturned', 'StillOut']);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE detail = 'ancient'").get()).n, 0);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM waitlist WHERE name = 'Stale'").get()).n, 0);
+  await db.prepare('UPDATE schools SET retention_years = 0 WHERE id = 1').run();
+  await db.prepare('DELETE FROM checkouts WHERE item_id IN (?, ?)').run(mine.id, other.id);
+});
+
+test('reports: counts, popular items, lateness, busy times; scoped to what you manage', async () => {
+  // A school of its own, so the numbers are not mixed with other tests.
+  const school = await createSchool(db, { name: 'Report Academy' });
+  const codes = await db.prepare('SELECT admin_code, teacher_code FROM schools WHERE id = ?').get(school);
+  const adminCookie = cookiesFrom(await signUp({ name: 'Report Admin', email: 'report.admin@example.edu', password: 'long-enough-password' }, codes.admin_code));
+  const teacherCookie = cookiesFrom(await signUp({ name: 'Report Teacher', email: 'report.teacher@example.edu', password: 'long-enough-password' }, codes.teacher_code));
+  await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Rpt <b>Mine</b>' } });
+  await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'Rpt Admin Only' } });
+  await request('/admin/items', { method: 'POST', cookie: adminCookie, form: { name: 'Rpt Never Borrowed' } });
+  const mine = await db.prepare("SELECT * FROM items WHERE name LIKE 'Rpt <b>%'").get();
+  const theirs = await db.prepare("SELECT * FROM items WHERE name = 'Rpt Admin Only'").get();
+  await checkoutFor(mine, { student_name: 'Late Lou', student_id: '8181', email: 'late.lou@example.edu' });
+  await db.prepare("UPDATE checkouts SET due_date = '2020-01-01' WHERE item_id = ?").run(mine.id);
+  await checkoutFor(theirs, { student_name: 'Admin Item Person', student_id: '8282', email: 'admin.item@example.edu' });
+
+  const page = await (await request('/admin/reports', { cookie: adminCookie })).text();
+  assert.match(page, /<h1>Reports<\/h1>/);
+  assert.match(page, /Most borrowed/);
+  assert.match(page, /Rpt &lt;b&gt;Mine&lt;\/b&gt;/);
+  assert.doesNotMatch(page, /<b>Mine<\/b>/);
+  assert.match(page, /Late Lou/);
+  assert.match(page, /Rpt Never Borrowed/);
+  assert.match(page, /Busiest days/);
+  assert.match(page, /Busiest hours/);
+  assert.match(page, /<div class="value">2<\/div><div class="label">Check-outs/);
+  assert.match(page, /<div class="value">1<\/div><div class="label">Late/);
+
+  // A teacher's report covers only their own items.
+  const teacherPage = await (await request('/admin/reports?days=30', { cookie: teacherCookie })).text();
+  assert.match(teacherPage, /Late Lou/);
+  assert.match(teacherPage, /<div class="value">1<\/div><div class="label">Check-outs/);
+  assert.doesNotMatch(teacherPage, /Admin Item Person|Rpt Admin Only/);
+  // Another school sees none of it.
+  const rowland = await (await request('/admin/reports', { cookie: await adminLogin() })).text();
+  assert.doesNotMatch(rowland, /Late Lou|Rpt Admin Only/);
+  for (const days of ['30', '90', '365', '0', 'junk']) assert.equal((await request(`/admin/reports?days=${days}`, { cookie: adminCookie })).status, 200);
+
+  // An old check-out falls outside a short period but not "all time".
+  await db.prepare("UPDATE checkouts SET checked_out_at = '2019-01-01T10:00:00.000Z' WHERE item_id = ?").run(theirs.id);
+  assert.doesNotMatch(await (await request('/admin/reports?days=30', { cookie: adminCookie })).text(), /Admin Item Person/);
+  await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id IN (?, ?)').run(new Date().toISOString(), mine.id, theirs.id);
+  assert.equal((await request('/reports.js')).status, 200);
+});
+test('the health check asks the database', async () => {
+  const response = await request('/healthz');
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'ok');
 });
