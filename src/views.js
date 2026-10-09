@@ -350,7 +350,7 @@ ${errorList(errors)}
 }
 
 // Shown to the student who holds the item (recognised by this phone's cookie).
-export function ownCheckoutPage({ item, checkout, justCheckedOut, today }) {
+export function ownCheckoutPage({ item, checkout, justCheckedOut, today, extended = false, maxExtension = '', extensionError = '' }) {
   const late = !justCheckedOut && today && checkout.due_date < today;
   const heading = late
     ? `<div class="alert error" role="alert"><strong>This is late.</strong> It was due ${esc(formatDate(checkout.due_date))}. Please return it as soon as you can.</div>`
@@ -367,11 +367,30 @@ ${heading}
   <dt>Checked out</dt><dd>${esc(formatDateTime(checkout.checked_out_at))}</dd>
   <dt>Return by</dt><dd>${esc(formatDate(checkout.due_date))}</dd>
 </dl>
+${extended ? '<div class="alert success" role="status"><strong>Return date extended.</strong> Thank you for letting us know.</div>' : ''}
 <p class="muted">${justCheckedOut ? 'When you bring it back, scan the same code again to return it.' : 'Bringing it back now?'}</p>
-<form method="post" action="/i/${esc(item.code)}/return">
+<form method="post" action="/i/${esc(item.code)}/return" class="left">
+  <label>Anything we should know? <span class="muted">(optional: damage, missing parts)</span>
+    <textarea name="return_notes" rows="2" maxlength="300"></textarea>
+  </label>
   <button class="${justCheckedOut || late ? 'secondary' : 'primary'}">Return this item</button>
 </form>
-</div>`,
+</div>
+${
+  checkout.extended
+    ? ''
+    : `<details class="card" ${extensionError ? 'open' : ''}>
+  <summary>I need more time</summary>
+  <p class="muted small">You can move the return date once, by up to 7 days.</p>
+  ${extensionError ? `<div class="alert error" role="alert">${esc(extensionError)}</div>` : ''}
+  <form method="post" action="/i/${esc(item.code)}/extend">
+    <label>New return date
+      <input type="date" name="due_date" min="${esc(checkout.due_date)}" max="${esc(maxExtension)}" required>
+    </label>
+    <button class="secondary">Extend</button>
+  </form>
+</details>`
+}`,
   });
 }
 
@@ -394,6 +413,9 @@ ${schoolTag(item)}
     </label>
     <label>School email
       <input type="email" name="email" autocomplete="email" maxlength="254" required>
+    </label>
+    <label>Anything we should know? <span class="muted">(optional: damage, missing parts)</span>
+      <textarea name="return_notes" rows="2" maxlength="300"></textarea>
     </label>
     <button class="primary">Return this item</button>
   </form>
@@ -568,9 +590,12 @@ ${rows
   <td>${esc(row.student_id)}</td>
   <td><a href="mailto:${esc(row.email)}">${esc(row.email)}</a></td>
   <td>${esc(formatDateTime(row.checked_out_at))}</td>
-  <td>${esc(formatDate(row.due_date))}</td>
+  <td>${esc(formatDate(row.due_date))}${row.original_due_date ? `<div class="muted small">was ${esc(formatDate(row.original_due_date))}</div>` : ''}</td>
   <td>${statusBadge(row, today)}</td>
-  <td class="no-print"><div class="row-actions"><form method="post" action="/admin/checkouts/${row.id}/return"><button class="secondary small">Mark returned</button></form>${
+  <td class="no-print"><div class="row-actions"><form method="post" action="/admin/checkouts/${row.id}/return" class="inline-return"><input type="text" name="return_notes" maxlength="300" placeholder="Note (optional)" aria-label="Return note"><button class="secondary small">Mark returned</button></form>
+    <details class="due-edit"><summary class="small">Change date</summary>
+      <form method="post" action="/admin/checkouts/${row.id}/due"><input type="date" name="due_date" value="${esc(row.due_date)}" required><button class="secondary small">Save</button></form>
+    </details>${
       row.due_date < today
         ? `<a class="button secondary small" href="${esc(reminderLink(row, user))}" title="Opens your email app with a message ready to send">Email reminder</a>`
         : ''
@@ -614,7 +639,7 @@ ${body}`,
 export function historyPage({ user, rows, q, status, today }) {
   const body = rows.length
     ? `<div class="table-wrap"><table>
-<thead><tr><th>Item</th><th>Student</th><th>Student ID</th><th>Email</th><th>Checked out</th><th>Due</th><th>Returned</th><th>Status</th></tr></thead>
+<thead><tr><th>Item</th><th>Student</th><th>Student ID</th><th>Email</th><th>Checked out</th><th>Due</th><th>Returned</th><th>Return notes</th><th>Status</th></tr></thead>
 <tbody>
 ${rows
   .map(
@@ -624,8 +649,9 @@ ${rows
   <td>${esc(row.student_id)}</td>
   <td>${esc(row.email)}</td>
   <td>${esc(formatDateTime(row.checked_out_at))}</td>
-  <td>${esc(formatDate(row.due_date))}</td>
+  <td>${esc(formatDate(row.due_date))}${row.original_due_date ? `<div class="muted small">was ${esc(formatDate(row.original_due_date))}</div>` : ''}</td>
   <td>${row.returned_at ? `${esc(formatDateTime(row.returned_at))}<div class="muted small">by ${esc(row.returned_by)}</div>` : ''}</td>
+  <td>${row.return_notes ? `<span class="badge overdue-soft">Note</span> ${esc(row.return_notes)}` : ''}</td>
   <td>${statusBadge(row, today)}</td>
 </tr>`
   )

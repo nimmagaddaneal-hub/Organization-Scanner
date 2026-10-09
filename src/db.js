@@ -130,6 +130,18 @@ export async function openDb({ url, authToken }) {
     await client.execute({ sql: `UPDATE ${table} SET school_id = ? WHERE school_id IS NULL`, args: [DEFAULT_SCHOOL_ID] });
   }
 
+  // Return notes (damage, missing parts) and one extension of the return date.
+  const checkoutExtras = (await db.prepare('PRAGMA table_info(checkouts)').all()).map((column) => column.name);
+  if (!checkoutExtras.includes('return_notes')) {
+    await client.execute("ALTER TABLE checkouts ADD COLUMN return_notes TEXT NOT NULL DEFAULT ''");
+  }
+  if (!checkoutExtras.includes('extended')) {
+    await client.execute('ALTER TABLE checkouts ADD COLUMN extended INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!checkoutExtras.includes('original_due_date')) {
+    await client.execute('ALTER TABLE checkouts ADD COLUMN original_due_date TEXT');
+  }
+
   // A temporary password set by someone else must be changed at the next login.
   for (const table of ['users', 'students']) {
     const columns = (await db.prepare(`PRAGMA table_info(${table})`).all()).map((column) => column.name);

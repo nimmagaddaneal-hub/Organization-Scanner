@@ -111,8 +111,16 @@ export function createApp({
   );
   const findOpenCheckout = db.prepare('SELECT * FROM checkouts WHERE item_id = ? AND returned_at IS NULL');
   const markReturned = db.prepare(
-    'UPDATE checkouts SET returned_at = ?, returned_by = ? WHERE id = ? AND returned_at IS NULL'
+    'UPDATE checkouts SET returned_at = ?, returned_by = ?, return_notes = ? WHERE id = ? AND returned_at IS NULL'
   );
+  const RETURN_NOTES_MAX = 300;
+  // One extension of up to this many days, by the student who has the item.
+  const EXTENSION_DAYS = 7;
+  const addDays = (day, days) => {
+    const date = new Date(`${day}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+  };
 
   // At check-out the phone saves a private cookie for that item, so a later scan can offer "Return this item".
   const returnCookieName = (item) => `rt_${item.code}`;
@@ -209,7 +217,16 @@ export function createApp({
     const checkout = await findOpenCheckout.get(item.id);
     if (!checkout) return res.send(formPage(req));
     if (holdsItem(req, item, checkout)) {
-      return res.send(views.ownCheckoutPage({ item, checkout, justCheckedOut: req.query.done === '1', today: todayLocal() }));
+      return res.send(
+        views.ownCheckoutPage({
+          item,
+          checkout,
+          justCheckedOut: req.query.done === '1',
+          extended: req.query.extended === '1',
+          today: todayLocal(),
+          maxExtension: addDays(checkout.due_date > todayLocal() ? checkout.due_date : todayLocal(), EXTENSION_DAYS),
+        })
+      );
     }
     res.send(views.unavailablePage({ item }));
   });
@@ -282,6 +299,34 @@ export function createApp({
     res.redirect(303, `/i/${item.code}?done=1`);
   });
 
+  // One extension, by the phone that checked the item out. Staff can change a date any time from the dashboard.
+  app.post('/i/:code/extend', async (req, res) => {
+    const { item } = req;
+    const checkout = await findOpenCheckout.get(item.id);
+    if (!checkout || !holdsItem(req, item, checkout)) return res.redirect(303, `/i/${item.code}`);
+    const today = todayLocal();
+    const latest = addDays(checkout.due_date > today ? checkout.due_date : today, EXTENSION_DAYS);
+    const newDate = text(req.body?.due_date, 10);
+    const problem = checkout.extended
+      ? 'This check-out was already extended once. Ask a teacher if you need more time.'
+      : !isRealDate(newDate)
+        ? 'Choose a valid date.'
+        : newDate <= checkout.due_date || newDate < today
+          ? 'Choose a date after the current return date.'
+          : newDate > latest
+            ? `You can extend by up to ${EXTENSION_DAYS} days.`
+            : null;
+    if (problem) {
+      return res.status(400).send(
+        views.ownCheckoutPage({ item, checkout, today, maxExtension: latest, extensionError: problem })
+      );
+    }
+    await db
+      .prepare('UPDATE checkouts SET due_date = ?, original_due_date = COALESCE(original_due_date, due_date), extended = 1 WHERE id = ? AND returned_at IS NULL')
+      .run(newDate, checkout.id);
+    res.redirect(303, `/i/${item.code}?extended=1`);
+  });
+
   app.post('/i/:code/return', async (req, res) => {
     const { item } = req;
     const checkout = await findOpenCheckout.get(item.id);
@@ -313,7 +358,7 @@ export function createApp({
       }
     }
 
-    await markReturned.run(new Date().toISOString(), 'student', checkout.id);
+    await markReturned.run(new Date().toISOString(), 'student', text(req.body?.return_notes, RETURN_NOTES_MAX), checkout.id);
     returnLimiter.clear(limiterKey);
     res.clearCookie(returnCookieName(item), cookieOptions(req, { sameSite: 'lax', path: `/i/${item.code}` }));
     res.send(views.returnedPage({ item }));
@@ -604,7 +649,24 @@ export function createApp({
       .prepare(`SELECT c.id FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
       .get(...params);
     if (!checkout) return res.status(404).type('text').send('Check-out not found');
-    await markReturned.run(new Date().toISOString(), req.user.role, checkout.id);
+    await markReturned.run(new Date().toISOString(), req.user.role, text(req.body?.return_notes, RETURN_NOTES_MAX), checkout.id);
+    res.redirect(303, '/admin');
+  });
+
+  admin.post('/checkouts/:id/due', async (req, res) => {
+    const where = ['c.id = ?', 'c.returned_at IS NULL'];
+    const params = [Number(req.params.id)];
+    ownerScope(req.user, where, params);
+    const checkout = await db
+      .prepare(`SELECT c.id FROM checkouts c JOIN items i ON i.id = c.item_id WHERE ${where.join(' AND ')}`)
+      .get(...params);
+    if (!checkout) return res.status(404).type('text').send('Check-out not found');
+    const newDate = text(req.body?.due_date, 10);
+    if (isRealDate(newDate)) {
+      await db
+        .prepare('UPDATE checkouts SET due_date = ?, original_due_date = COALESCE(original_due_date, due_date), extended = 1 WHERE id = ?')
+        .run(newDate, checkout.id);
+    }
     res.redirect(303, '/admin');
   });
 
@@ -614,12 +676,12 @@ export function createApp({
     const rows = await findCheckouts(req.user, { openOnly });
     const header = [
       'Item', 'Student name', 'Student ID', 'Email', 'Phone', 'Purpose',
-      'Checked out', 'Due date', 'Returned', 'Returned by', 'Status',
+      'Checked out', 'Due date', 'Original due date', 'Returned', 'Returned by', 'Return notes', 'Status',
     ];
     const lines = rows.map((row) =>
       [
         row.item_name, row.student_name, row.student_id, row.email, row.phone, row.purpose,
-        row.checked_out_at, row.due_date, row.returned_at, row.returned_by,
+        row.checked_out_at, row.due_date, row.original_due_date, row.returned_at, row.returned_by, row.return_notes,
         row.returned_at ? 'Returned' : row.due_date < today ? 'Overdue' : 'On time',
       ]
         .map(csvCell)

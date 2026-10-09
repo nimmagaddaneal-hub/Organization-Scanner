@@ -915,3 +915,91 @@ test('the scan page, its script and the QR reader library are served', async () 
   const found = await request(`/find?code=${camera.code.toUpperCase()}`);
   assert.equal(found.headers.get('location'), `/i/${camera.code}`);
 });
+
+const dayFrom = (days) => new Date(Date.now() + days * 24 * 60 * 60 * 1000).toLocaleDateString('en-CA');
+
+test('return notes: students and staff can record damage or missing parts, staff see them', async () => {
+  const adminCookie = await adminLogin();
+  const [bike, pump] = await Promise.all(
+    ['Notes Test Bike', 'Notes Test Pump'].map(async (name) =>
+      db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name }))
+    )
+  );
+  const first = await checkoutFor(bike, { student_name: 'Nora Notes', student_id: '3131' });
+  const returned = await request(`/i/${bike.code}/return`, {
+    method: 'POST',
+    cookie: first.cookie,
+    form: { return_notes: 'Left tire is flat <script>alert(1)</script>' },
+  });
+  assert.match(await returned.text(), /Returned/);
+  assert.equal((await db.prepare('SELECT return_notes FROM checkouts WHERE item_id = ?').get(bike.id)).return_notes, 'Left tire is flat <script>alert(1)</script>');
+
+  // Staff return with a note, too. Notes are capped.
+  await checkoutFor(pump, { student_name: 'Pete Pump', student_id: '3232' });
+  const checkoutId = (await db.prepare('SELECT id FROM checkouts WHERE item_id = ?').get(pump.id)).id;
+  await request(`/admin/checkouts/${checkoutId}/return`, { method: 'POST', cookie: adminCookie, form: { return_notes: 'x'.repeat(500) } });
+  assert.equal((await db.prepare('SELECT return_notes FROM checkouts WHERE id = ?').get(checkoutId)).return_notes.length, 300);
+
+  const history = await (await request('/admin/history?q=Notes+Test', { cookie: adminCookie })).text();
+  assert.match(history, /Left tire is flat/);
+  assert.doesNotMatch(history, /<script>alert/);
+  const csv = await (await request('/admin/export.csv?scope=all', { cookie: adminCookie })).text();
+  assert.match(csv, /"Return notes"/);
+  assert.match(csv, /Left tire is flat/);
+
+  // The return forms ask for notes.
+  const free = await (await request(`/i/${bike.code}`)).text();
+  assert.doesNotMatch(free, /return_notes/);
+  const taken = await checkoutFor(bike, { student_name: 'Next Student', student_id: '3333' });
+  assert.match(await (await request(`/i/${bike.code}`, { cookie: taken.cookie })).text(), /name="return_notes"/);
+  assert.match(await (await request(`/i/${bike.code}`)).text(), /name="return_notes"/);
+  await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ? AND returned_at IS NULL').run(new Date().toISOString(), bike.id);
+});
+
+test('extension: the phone that checked out can move the date once, up to 7 days; staff can change it any time', async () => {
+  const adminCookie = await adminLogin();
+  const lamp = await db.prepare('SELECT * FROM items WHERE id = ?').get(await createItem(db, { name: 'Extension Test Lamp' }));
+  const due = dayFrom(2);
+  const { cookie } = await checkoutFor(lamp, { student_name: 'Eve Extends', student_id: '4141', due_date: due });
+  const extend = (form, who = cookie) => request(`/i/${lamp.code}/extend`, { method: 'POST', cookie: who, form });
+  const row = () => db.prepare('SELECT due_date, original_due_date, extended FROM checkouts WHERE item_id = ? AND returned_at IS NULL').get(lamp.id);
+
+  assert.match(await (await request(`/i/${lamp.code}`, { cookie })).text(), /I need more time/);
+  // Not the same phone, too early, or too far: nothing changes.
+  assert.equal((await extend({ due_date: dayFrom(4) }, '')).status, 303);
+  assert.equal((await row()).extended, 0);
+  assert.equal((await extend({ due_date: due })).status, 400);
+  assert.equal((await extend({ due_date: dayFrom(1) })).status, 400);
+  const tooFar = await extend({ due_date: dayFrom(10) });
+  assert.equal(tooFar.status, 400);
+  assert.match(await tooFar.text(), /up to 7 days/);
+  assert.equal((await extend({ due_date: 'nonsense' })).status, 400);
+  assert.equal((await row()).due_date, due);
+
+  // A good request works once.
+  const ok = await extend({ due_date: dayFrom(8) });
+  assert.equal(ok.status, 303);
+  assert.equal(ok.headers.get('location'), `/i/${lamp.code}?extended=1`);
+  assert.deepEqual({ ...(await row()) }, { due_date: dayFrom(8), original_due_date: due, extended: 1 });
+  const own = await (await request(`/i/${lamp.code}?extended=1`, { cookie })).text();
+  assert.match(own, /Return date extended/);
+  assert.doesNotMatch(own, /I need more time/);
+  const again = await extend({ due_date: dayFrom(9) });
+  assert.equal(again.status, 400);
+  assert.equal((await row()).due_date, dayFrom(8));
+
+  // The dashboard shows the original date. Staff change the date themselves, and only for their own school's items.
+  assert.match(await (await request('/admin', { cookie: adminCookie })).text(), /was /);
+  const checkoutId = (await db.prepare('SELECT id FROM checkouts WHERE item_id = ? AND returned_at IS NULL').get(lamp.id)).id;
+  assert.equal((await request(`/admin/checkouts/${checkoutId}/due`, { method: 'POST', cookie: adminCookie, form: { due_date: dayFrom(20) } })).status, 303);
+  assert.equal((await row()).due_date, dayFrom(20));
+  assert.equal((await row()).original_due_date, due);
+  await request(`/admin/checkouts/${checkoutId}/due`, { method: 'POST', cookie: adminCookie, form: { due_date: 'bad' } });
+  assert.equal((await row()).due_date, dayFrom(20));
+  const otherSchool = await createSchool(db, { name: 'Extension Other School' });
+  const otherCookie = cookiesFrom(await signUp({ name: 'Ext Other', email: 'ext.other@example.edu', password: 'long-enough-password' }, (await db.prepare('SELECT admin_code FROM schools WHERE id = ?').get(otherSchool)).admin_code));
+  assert.equal((await request(`/admin/checkouts/${checkoutId}/due`, { method: 'POST', cookie: otherCookie, form: { due_date: dayFrom(30) } })).status, 404);
+  const csv = await (await request('/admin/export.csv?scope=current', { cookie: adminCookie })).text();
+  assert.match(csv, /Original due date/);
+  await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ?').run(new Date().toISOString(), lamp.id);
+});
