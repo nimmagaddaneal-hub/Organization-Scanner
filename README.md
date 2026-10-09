@@ -156,6 +156,31 @@ Without these settings, requests are still saved, but you are not told. The serv
 
 The "ours" diagram in the Side by side section is drawn in 3D (isometric) on a canvas, and the section **locks in place** while you scroll through it. Scrolling drops three item boxes, a dashboard and a platform onto the ground, and finally the orb, your organization. Each landing sends a ripple across the ground mesh and a pulse ring; boxes hop and ride the waves. Labels and numbered pins appear as things land, and the matching line beside the diagram lights up. Falling follows the scroll position, so scrolling back up lifts everything again. If the visitor's device asks for reduced motion, the finished diagram is shown without animation or locking. The code is in `public/diagram.js`; the orb in the first section is `public/hero.js` and can be dragged.
 
+## Scan button
+
+The home page has a **Scan an item** button (`/scan`). It opens the phone camera inside the site and reads the QR code on an item, then opens that item's form. It uses the phone's built-in reader when there is one (which also reads the barcode), and a small open-source QR reader ([jsQR](https://github.com/cozmo/jsQR), Apache-2.0) otherwise. Typing the code under the barcode always works. The camera needs a secure address (`https://`, or `localhost`) and the visitor's permission.
+
+## Return notes and extensions
+
+- **Return notes:** when returning, a student can write what the teacher should know (damage, missing parts), and staff can add a note when they mark an item returned. Notes show in **History**, with a "Note" tag, and in the CSV.
+- **More time:** on the phone that checked an item out, **I need more time** moves the return date once, by up to 7 days (from the current date, or from today if it is already late). Staff can change a return date any time with **Change date** on the dashboard. The original date is kept and shown as "was ...", and is in the CSV.
+
+## Many items at once, categories, labels
+
+- **Spreadsheet import:** on **Items**, open "Add many items from a spreadsheet", then paste rows (name, description, category) or choose a CSV file. A header row is fine. Up to 100 items per import. Teachers import into their own items.
+- **Categories:** an optional category on each item. The Items list is sorted by category.
+- **Label sizes:** on **Codes**, choose Large (2 across), Medium (3), Small (4) or Sticker (6 across, QR and name only). Pick the size that matches your sticker paper, then print. Check one test page before printing a whole sheet.
+
+## What's available link
+
+An administrator can create a link on **Items** to a public page showing which of the school's items are available right now, grouped by category. It shows items only, with a "due back" date for items that are out, and **never any names**. It is off until an administrator creates it. "Make a new link" kills the old one, and "Turn off" removes it. Anyone with the link can open it, so only share it with your school.
+
+## Waiting lists
+
+When an item is checked out, a student can open **Tell me when it is back** and leave a name and school email. Nothing is sent automatically. Staff see it as an "N waiting" tag on the dashboard and on the **Waitlist** page, where **Email them** opens your own mail app with a message ready. Someone comes off the list when they check the item out, when staff remove them, or when they are erased. Up to 20 people per item.
+
+Not built: item photos. They would need image storage, and the free database is small.
+
 ## Reminders for late items
 
 On the dashboard, every late row has an **Email reminder** button, and the top has **Email everyone late** (everyone is on Bcc, so addresses stay private). They open your own email app with the message already written. Nothing is sent by the site, so no email service is needed.
@@ -261,7 +286,7 @@ Run these by hand after setup or after any change:
 - [ ] Sign up a second account with the teacher code. It lands on **Items** and sees no sample items and no **People** link.
 - [ ] As the teacher, list an item. The label opens with a QR code and a barcode. **Print** opens the print dialog.
 - [ ] Scan a code (or click **Open form**). The item name and check-out time are filled in and read-only.
-- [ ] On the home page, type the code printed under the barcode. The same form opens.
+- [ ] On the home page, press **Scan an item**, allow the camera, and point it at a QR code: the form opens. Typing the code under the barcode also works.
 - [ ] Submit the form with no return date. An error appears and nothing is saved.
 - [ ] Submit the form with valid details. The confirmation screen appears.
 - [ ] The check-out appears on the teacher's dashboard with item, name, student ID, email, dates and **On time**. The admin sees it too.
@@ -278,6 +303,10 @@ Run these by hand after setup or after any change:
 - [ ] Delete your own teacher account in Settings: you are logged out, your items remain as organization items. The only admin is refused.
 - [ ] As admin, open **People**, **Delete** a teacher account after the confirmation page.
 - [ ] On the dashboard, make an item late (set an old return date). **Email reminder** opens your mail app with the message written. The student sees **This is late** on that item's page.
+- [ ] Return an item with a note, then find the note in **History**. Use **I need more time** once on the phone that checked it out, and **Change date** on the dashboard.
+- [ ] Import a few items from a pasted spreadsheet. Print **Codes** at a different label size.
+- [ ] Create the **What's available** link on **Items**, open it in a private window: no names are shown.
+- [ ] On a checked-out item, join the waiting list from another phone. It shows on **Waitlist**; **Email them** opens your mail app; checking the item out removes the person.
 - [ ] Open `/privacy` from the footer and from both sign-up forms.
 - [ ] With `OWNER_PASSWORD` set, log in at `/owner`: add a school, read the demo request, find a student, reset their password, and erase them.
 - [ ] On the home page, send a demo request. It arrives in your own inbox. It is not visible anywhere in the admin pages.

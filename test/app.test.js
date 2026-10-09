@@ -132,12 +132,12 @@ test('form rejects missing and invalid fields', async () => {
 });
 
 test('every admin route requires the login', async () => {
-  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete']) {
+  for (const path of ['/admin', '/admin/history', '/admin/items', '/admin/qr', '/admin/export.csv', '/admin/items/1/edit', '/admin/items/1/delete', '/admin/people', '/admin/settings', '/admin/settings/delete', '/admin/people/1/delete', '/admin/waitlist']) {
     const response = await request(path);
     assert.equal(response.status, 302, path);
     assert.equal(response.headers.get('location'), '/admin/login', path);
   }
-  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete', ]) {
+  for (const path of ['/admin/items', '/admin/items/1', '/admin/items/1/delete', '/admin/checkouts/1/return', '/admin/logout', '/admin/people/1/active', '/admin/people/1/delete', '/admin/waitlist/1/delete', '/admin/settings/name', '/admin/settings/password', '/admin/settings/delete', ]) {
     const response = await request(path, { method: 'POST', form: { name: 'x' } });
     assert.equal(response.status, 401, path);
   }
@@ -1101,4 +1101,71 @@ test('the what-is-available page: opt-in link, no names, school only', async () 
   assert.equal((await request(fresh)).status, 404);
   assert.equal((await request('/available/short')).status, 404);
   assert.equal((await request('/available/aaaaaaaaaaaaaaaaaaaa')).status, 404);
+});
+
+test('waiting list: join, staff email next in line, removed on check-out, scoped, erasable', async () => {
+  const adminCookie = await adminLogin();
+  const teacherCookie = cookiesFrom(await signUp({ name: 'Wait Teacher', email: 'wait.teacher@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+  await request('/admin/items', { method: 'POST', cookie: teacherCookie, form: { name: 'Wait Projector' } });
+  const projector = await db.prepare("SELECT * FROM items WHERE name = 'Wait Projector'").get();
+  const join = (form, cookie) => request(`/i/${projector.code}/waitlist`, { method: 'POST', cookie, form });
+  const rows = () => db.prepare('SELECT * FROM waitlist WHERE item_id = ? ORDER BY id').all(projector.id);
+
+  // Nobody can join the list of an item that is free.
+  assert.equal((await join({ name: 'Early Bird', email: 'early@example.edu' })).status, 303);
+  assert.equal((await rows()).length, 0);
+
+  const holder = await checkoutFor(projector, { student_name: 'Holder Hal', student_id: '1111', email: 'holder.hal@example.edu' });
+  assert.match(await (await request(`/i/${projector.code}`)).text(), /Tell me when it is back/);
+
+  // Validation, and the holder's own phone cannot join.
+  assert.equal((await join({ name: '', email: 'a@example.edu' })).status, 400);
+  assert.equal((await join({ name: 'No Email', email: 'nope' })).status, 400);
+  assert.equal((await join({ name: 'Holder', email: 'holder.hal@example.edu' }, holder.cookie)).status, 303);
+  assert.equal((await rows()).length, 0);
+
+  // Two people join, and joining twice with the same email does not add a second row.
+  const first = await join({ name: 'Wanda Waits', email: 'wanda@example.edu' });
+  assert.equal(first.status, 200);
+  assert.match(await first.text(), /You are on the waiting list/);
+  assert.equal((await join({ name: 'Wanda Again', email: 'WANDA@example.edu' })).status, 200);
+  await join({ name: 'Walt Waits', email: 'walt@example.edu' });
+  assert.deepEqual((await rows()).map((row) => row.email), ['wanda@example.edu', 'walt@example.edu']);
+
+  // Staff see it: a tag on the dashboard and the waiting list page with a ready email.
+  assert.match(await (await request('/admin', { cookie: teacherCookie })).text(), /2 waiting/);
+  const page = await (await request('/admin/waitlist', { cookie: teacherCookie })).text();
+  assert.match(page, /Wanda Waits/);
+  assert.match(page, /Walt Waits/);
+  const link = page.match(/href="(mailto:wanda%40example\.edu[^"]*)"/)[1].replaceAll('&amp;', '&');
+  assert.match(decodeURIComponent(link), /Wait Projector" is back/);
+  assert.match(decodeURIComponent(link), /Hi Wanda,/);
+
+  // Another teacher at the same school does not see or remove them.
+  const otherTeacher = cookiesFrom(await signUp({ name: 'Other Wait Teacher', email: 'other.wait@example.edu', password: 'long-enough-password' }, TEACHER_CODE));
+  assert.doesNotMatch(await (await request('/admin/waitlist', { cookie: otherTeacher })).text(), /Wanda Waits/);
+  const wandaId = (await rows())[0].id;
+  assert.equal((await request(`/admin/waitlist/${wandaId}/delete`, { method: 'POST', cookie: otherTeacher })).status, 404);
+  // Another school's admin does not either.
+  const school = await createSchool(db, { name: 'Wait Other School' });
+  const otherAdmin = cookiesFrom(await signUp({ name: 'Wait Other', email: 'wait.other.admin@example.edu', password: 'long-enough-password' }, (await db.prepare('SELECT admin_code FROM schools WHERE id = ?').get(school)).admin_code));
+  assert.doesNotMatch(await (await request('/admin/waitlist', { cookie: otherAdmin })).text(), /Wanda Waits/);
+  assert.equal((await request(`/admin/waitlist/${wandaId}/delete`, { method: 'POST', cookie: otherAdmin })).status, 404);
+
+  // The item comes back. Wanda checks it out and comes off the list; Walt is cleared by staff.
+  await request(`/i/${projector.code}/return`, { method: 'POST', cookie: holder.cookie });
+  assert.match(await (await request('/admin/waitlist', { cookie: adminCookie })).text(), /Available now/);
+  const wanda = await checkoutFor(projector, { student_name: 'Wanda Waits', student_id: '2222', email: 'Wanda@example.edu' });
+  assert.equal(wanda.response.status, 303);
+  assert.deepEqual((await rows()).map((row) => row.email), ['walt@example.edu']);
+  const waltId = (await rows())[0].id;
+  assert.equal((await request(`/admin/waitlist/${waltId}/delete`, { method: 'POST', cookie: teacherCookie })).status, 303);
+  assert.equal((await rows()).length, 0);
+
+  // Erasing a person by email also clears their waiting-list rows.
+  await join({ name: 'Erase Wait', email: 'erase.wait@example.edu' });
+  assert.equal((await rows()).length, 1);
+  await request('/owner/students/erase', { method: 'POST', cookie: await ownerLogin(), form: { who: 'erase.wait@example.edu' } });
+  assert.equal((await rows()).length, 0);
+  await db.prepare('UPDATE checkouts SET returned_at = ? WHERE item_id = ? AND returned_at IS NULL').run(new Date().toISOString(), projector.id);
 });

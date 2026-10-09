@@ -62,6 +62,7 @@ export function createApp({
 
   const loginLimiter = createRateLimiter(8, 15 * 60 * 1000);
   const demoLimiter = createRateLimiter(5, 60 * 60 * 1000);
+  const waitlistLimiter = createRateLimiter(10, 60 * 60 * 1000);
   const ownerLimiter = createRateLimiter(6, 15 * 60 * 1000);
   // Wrong guesses when returning without the phone that checked the item out. Per item and address.
   const returnLimiter = createRateLimiter(5, 10 * 60 * 1000);
@@ -307,6 +308,9 @@ export function createApp({
       throw error;
     }
 
+    // Someone who was waiting for this item and now has it comes off the waiting list.
+    await db.prepare('DELETE FROM waitlist WHERE item_id = ? AND lower(email) = ?').run(item.id, values.email);
+
     // Remember on this phone that this student holds the item, so a later scan offers "Return".
     res.cookie(
       returnCookieName(item),
@@ -318,6 +322,34 @@ export function createApp({
       })
     );
     res.redirect(303, `/i/${item.code}?done=1`);
+  });
+
+  // Join the waiting list for an item that is checked out. Nothing is sent automatically: staff email people.
+  const WAITLIST_MAX = 20;
+  app.post('/i/:code/waitlist', async (req, res) => {
+    const { item } = req;
+    const checkout = await findOpenCheckout.get(item.id);
+    if (!checkout || holdsItem(req, item, checkout)) return res.redirect(303, `/i/${item.code}`);
+    const name = text(req.body?.name, 100);
+    const email = text(req.body?.email, 254).toLowerCase();
+    const fail = (message, status = 400) =>
+      res.status(status).send(views.unavailablePage({ item, waitlistErrors: [message] }));
+    if (waitlistLimiter.isBlocked(req.ip)) return fail('Too many requests. Try again later.', 429);
+    if (!name) return fail('Enter your name.');
+    if (!EMAIL_PATTERN.test(email)) return fail('Enter a valid email address.');
+    if (item.school_email_domain && !email.endsWith(`@${item.school_email_domain}`)) {
+      return fail(`Use your school email ending in @${item.school_email_domain}.`);
+    }
+    const { count } = await db.prepare('SELECT COUNT(*) AS count FROM waitlist WHERE item_id = ?').get(item.id);
+    const existing = await db.prepare('SELECT id FROM waitlist WHERE item_id = ? AND lower(email) = ?').get(item.id, email);
+    if (!existing) {
+      if (count >= WAITLIST_MAX) return fail('The waiting list for this item is full. Ask a teacher.');
+      await db
+        .prepare('INSERT INTO waitlist (item_id, name, email, created_at) VALUES (?, ?, ?, ?)')
+        .run(item.id, name, email, new Date().toISOString());
+      waitlistLimiter.recordFailure(req.ip);
+    }
+    res.send(views.waitlistJoinedPage({ item }));
   });
 
   // One extension, by the phone that checked the item out. Staff can change a date any time from the dashboard.
@@ -635,7 +667,8 @@ export function createApp({
     const order = openOnly ? 'c.due_date ASC, c.checked_out_at ASC' : 'c.checked_out_at DESC';
     return db
       .prepare(
-        `SELECT c.*, i.name AS item_name
+        `SELECT c.*, i.name AS item_name,
+                (SELECT COUNT(*) FROM waitlist w WHERE w.item_id = c.item_id) AS waiting
            FROM checkouts c JOIN items i ON i.id = c.item_id
           ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
           ORDER BY ${order}`
@@ -689,6 +722,35 @@ export function createApp({
         .run(newDate, checkout.id);
     }
     res.redirect(303, '/admin');
+  });
+
+  // Who is waiting for what, for the items this person manages.
+  admin.get('/waitlist', async (req, res) => {
+    const where = [];
+    const params = [];
+    ownerScope(req.user, where, params);
+    const rows = await db
+      .prepare(
+        `SELECT w.id, w.name, w.email, w.created_at, i.name AS item_name, i.id AS item_id,
+                EXISTS(SELECT 1 FROM checkouts c WHERE c.item_id = i.id AND c.returned_at IS NULL) AS is_out
+           FROM waitlist w JOIN items i ON i.id = w.item_id
+          WHERE ${where.join(' AND ')}
+          ORDER BY i.name COLLATE NOCASE, w.created_at`
+      )
+      .all(...params);
+    res.send(views.waitlistPage({ user: req.user, rows }));
+  });
+
+  admin.post('/waitlist/:id/delete', async (req, res) => {
+    const where = ['w.id = ?'];
+    const params = [Number(req.params.id)];
+    ownerScope(req.user, where, params);
+    const entry = await db
+      .prepare(`SELECT w.id FROM waitlist w JOIN items i ON i.id = w.item_id WHERE ${where.join(' AND ')}`)
+      .get(...params);
+    if (!entry) return res.status(404).type('text').send('Not found');
+    await db.prepare('DELETE FROM waitlist WHERE id = ?').run(entry.id);
+    res.redirect(303, '/admin/waitlist');
   });
 
   admin.get('/export.csv', async (req, res) => {
@@ -1117,9 +1179,8 @@ export function createApp({
       .prepare('SELECT COUNT(*) AS count FROM checkouts WHERE lower(email) = ? OR lower(student_id) = ?')
       .get(who, who);
     const accounts = await db.prepare('SELECT COUNT(*) AS count FROM students WHERE lower(email) = ? OR lower(student_id) = ?').get(who, who);
-    res.send(
-      views.ownerEraseStudentPage({ who, checkouts: found.count, accounts: accounts.count })
-    );
+    const waiting = await db.prepare('SELECT COUNT(*) AS count FROM waitlist WHERE lower(email) = ?').get(who);
+    res.send(views.ownerEraseStudentPage({ who, checkouts: found.count, accounts: accounts.count, waiting: waiting.count }));
   });
 
   owner.post('/students/erase', async (req, res) => {
@@ -1130,6 +1191,7 @@ export function createApp({
       .run(who, who);
     // Student accounts from the time when they existed.
     await db.prepare('DELETE FROM students WHERE lower(email) = ? OR lower(student_id) = ?').run(who, who);
+    await db.prepare('DELETE FROM waitlist WHERE lower(email) = ?').run(who);
     res.redirect(303, '/owner/accounts?saved=erased');
   });
 

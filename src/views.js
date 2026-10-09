@@ -24,6 +24,7 @@ const STAFF_LINKS = [
   ['dashboard', '/admin', 'Checked out'],
   ['history', '/admin/history', 'History'],
   ['items', '/admin/items', 'Items'],
+  ['waitlist', '/admin/waitlist', 'Waitlist'],
   ['codes', '/admin/qr', 'Codes'],
   ['people', '/admin/people', 'People', 'admin'],
 ];
@@ -395,7 +396,7 @@ ${
 }
 
 // Shown to everyone else. Shows nothing about who has the item.
-export function unavailablePage({ item, errors = [] }) {
+export function unavailablePage({ item, errors = [], waitlistErrors = [] }) {
   return layout({
     title: `Unavailable: ${item.name}`,
     body: `<div class="card center">
@@ -418,6 +419,20 @@ ${schoolTag(item)}
       <textarea name="return_notes" rows="2" maxlength="300"></textarea>
     </label>
     <button class="primary">Return this item</button>
+  </form>
+</details>
+<details class="card" ${waitlistErrors.length ? 'open' : ''}>
+  <summary>Tell me when it is back</summary>
+  <p class="muted small">Leave your name and school email. A teacher can email you when it is returned. Nothing is sent automatically.</p>
+  ${errorList(waitlistErrors)}
+  <form method="post" action="/i/${esc(item.code)}/waitlist" novalidate>
+    <label>Your name
+      <input type="text" name="name" autocomplete="name" maxlength="100" required>
+    </label>
+    <label>School email
+      <input type="email" name="email" autocomplete="email" maxlength="254" required>
+    </label>
+    <button class="secondary">Join the waiting list</button>
   </form>
 </details>`,
   });
@@ -585,7 +600,7 @@ export function dashboardPage({ user, rows, q, status, today, counts }) {
 ${rows
   .map(
     (row) => `<tr class="${row.due_date < today ? 'row-overdue' : ''}">
-  <td>${esc(row.item_name)}</td>
+  <td>${esc(row.item_name)}${row.waiting ? `<div><a class="badge overdue-soft" href="/admin/waitlist" title="People waiting for this item">${row.waiting} waiting</a></div>` : ''}</td>
   <td>${esc(row.student_name)}${row.phone ? `<div class="muted small">${esc(row.phone)}</div>` : ''}${row.purpose ? `<div class="muted small">${esc(row.purpose)}</div>` : ''}</td>
   <td>${esc(row.student_id)}</td>
   <td><a href="mailto:${esc(row.email)}">${esc(row.email)}</a></td>
@@ -1023,6 +1038,10 @@ export function privacyPage({ user = null } = {}) {
     <li>Your name, email, role, school, and a scrambled version of your password.</li>
     <li>The items you list.</li>
   </ul>
+  <h3>Anyone who joins a waiting list</h3>
+  <ul>
+    <li>The name and school email you type in. Staff at the school that owns the item see it, so they can email you when the item is back. It is removed when you check the item out, when staff clear it, or when you ask for your details to be erased.</li>
+  </ul>
   <h3>Schools that ask for a demo</h3>
   <ul>
     <li>The name, email, school, role and message you type into the demo form. They are emailed to the person who runs the site and saved so the request is not lost.</li>
@@ -1247,15 +1266,15 @@ export function ownerConfirmPage({ title, message, action, button }) {
   });
 }
 
-export function ownerEraseStudentPage({ who, checkouts, accounts }) {
+export function ownerEraseStudentPage({ who, checkouts, accounts, waiting = 0 }) {
   return layout({
     title: 'Erase student records',
     owner: true,
     body: `<h1>Erase student records</h1>
 <div class="card">
-  <p>Matching <strong>${esc(who)}</strong> (email or student ID): <strong>${checkouts}</strong> check-out${checkouts === 1 ? '' : 's'}${accounts ? ` and ${accounts} old student account${accounts === 1 ? '' : 's'}` : ''}.</p>
+  <p>Matching <strong>${esc(who)}</strong> (email or student ID): <strong>${checkouts}</strong> check-out${checkouts === 1 ? '' : 's'}${accounts ? ` and ${accounts} old student account${accounts === 1 ? '' : 's'}` : ''}${waiting ? `, and ${waiting} waiting-list entr${waiting === 1 ? 'y' : 'ies'}` : ''}.</p>
   ${
-    checkouts || accounts
+    checkouts || accounts || waiting
       ? `<div class="alert error" role="alert"><strong>This cannot be undone.</strong> The name, ID, email, phone and notes are removed from those check-outs. They stay as anonymous history.</div>
   <form method="post" action="/owner/students/erase"><input type="hidden" name="who" value="${esc(who)}"><button class="danger block">Erase for good</button></form>`
       : '<p class="muted">Nothing matches.</p>'
@@ -1324,6 +1343,74 @@ ${list
         )
         .join('')
     : '<p class="card empty">Nothing is listed yet.</p>'
+}`,
+  });
+}
+
+// ---------- Waiting lists ----------
+
+export function waitlistJoinedPage({ item }) {
+  return layout({
+    title: 'On the waiting list',
+    body: `<div class="card center">
+<h1>${esc(item.name)}</h1>
+${schoolTag(item)}
+<div class="alert success" role="status"><strong>You are on the waiting list.</strong> A teacher can email you when it is back. Nothing is sent automatically.</div>
+</div>`,
+  });
+}
+
+export function waitlistPage({ user, rows }) {
+  const items = new Map();
+  for (const row of rows) {
+    if (!items.has(row.item_id)) items.set(row.item_id, { name: row.item_name, is_out: row.is_out, people: [] });
+    items.get(row.item_id).people.push(row);
+  }
+  const mail = (row) => {
+    const subject = `${row.item_name} is available`;
+    const body = [
+      `Hi ${String(row.name).trim().split(/\s+/)[0] || 'there'},`,
+      '',
+      `"${row.item_name}" is back and available. Scan the QR code on it to check it out.`,
+      '',
+      'Thank you,',
+      user.name,
+      user.school_name,
+    ].join('\n');
+    return `mailto:${encodeURIComponent(row.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  };
+  return layout({
+    title: 'Waiting lists',
+    user,
+    active: 'waitlist',
+    wide: true,
+    body: `<div class="page-head"><div><h1>Waiting lists</h1><p class="page-sub">People waiting for an item that was checked out. The earliest is first. Email them when it is back, then remove them (they also come off the list when they check it out).</p></div></div>
+${
+  items.size
+    ? [...items.values()]
+        .map(
+          (entry) => `<h2>${esc(entry.name)} ${entry.is_out ? '<span class="badge overdue-soft">Checked out</span>' : '<span class="badge ontime">Available now</span>'}</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>#</th><th>Name</th><th>Email</th><th>Asked</th><th></th></tr></thead>
+<tbody>
+${entry.people
+  .map(
+    (row, index) => `<tr>
+  <td>${index + 1}</td>
+  <td>${esc(row.name)}</td>
+  <td>${esc(row.email)}</td>
+  <td>${esc(formatDateTime(row.created_at))}</td>
+  <td><div class="row-actions">
+    <a class="button secondary small" href="${esc(mail(row))}" title="Opens your email app with a message ready to send">Email them</a>
+    <form method="post" action="/admin/waitlist/${row.id}/delete"><button class="link-button danger-link">Remove</button></form>
+  </div></td>
+</tr>`
+  )
+  .join('')}
+</tbody></table></div>`
+        )
+        .join('')
+    : '<p class="card empty">Nobody is waiting for anything.</p>'
 }`,
   });
 }
